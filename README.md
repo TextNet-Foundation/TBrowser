@@ -24,10 +24,6 @@ A terminal-based browser for **TNet** — a decentralized text network built on 
 
 ## Video Clip
 
-<video width="640" height="360" controls>
-  <source src="https://github.com/TextNet-Foundation/TBrowser/raw/refs/heads/main/tbrowser_clip.mp4" type="video/mp4">
-  Your browser doesn't support video
-</video>
 
 ---
 
