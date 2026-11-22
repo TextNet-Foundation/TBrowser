@@ -114,49 +114,122 @@ fn extract_meta(raw: &str) -> (HashMap<String, MetaValue>, HashMap<String, Strin
 fn strip_comments(raw: &str) -> Vec<String> {
     let mut result = Vec::new();
     let mut in_multiline = false;
+    let mut in_fence = false;
 
     for line in raw.lines() {
+        // Внутри ```-блока содержимое сырое: комментарии там не распознаются
+        if in_fence {
+            if line.trim_start().starts_with("```") {
+                in_fence = false;
+            }
+            result.push(line.to_string());
+            continue;
+        }
+        if line.trim_start().starts_with("```") {
+            in_fence = true;
+            result.push(line.to_string());
+            continue;
+        }
+
         if in_multiline {
             if let Some(end) = line.find("*/") {
                 in_multiline = false;
-                let after = line[end + 2..].trim();
-                if !after.is_empty() {
-                    result.push(after.to_string());
+                let (text, opened) = strip_line_comments(&line[end + 2..]);
+                in_multiline = opened;
+                let text = text.trim();
+                if !text.is_empty() {
+                    result.push(text.to_string());
                 }
             }
             continue;
         }
 
-        let current = line.to_string();
+        let (text, opened_multiline) = strip_line_comments(line);
+        in_multiline = opened_multiline;
 
-        if let Some(pos) = current.find("//") {
-            let before = current[..pos].trim_end().to_string();
-            if !before.is_empty() {
-                result.push(before);
-            }
-            continue;
+        let text = text.trim_end();
+        if !text.is_empty() {
+            result.push(text.to_string());
         }
-
-        if let Some(start) = current.find("/*") {
-            let before = current[..start].trim_end().to_string();
-            if !before.is_empty() {
-                result.push(before);
-            }
-            if let Some(end) = current[start + 2..].find("*/") {
-                let after = current[start + 2 + end + 2..].trim().to_string();
-                if !after.is_empty() {
-                    result.push(after);
-                }
-            } else {
-                in_multiline = true;
-            }
-            continue;
-        }
-
-        result.push(current);
     }
 
     result
+}
+
+// Убирает комментарии из одной строки, не задевая то, что комментарием не является:
+//  - URL вида `tmutp://host/path` (`//` после `:`)
+//  - `//` внутри инлайн-кода: `` `a // b` ``
+//  - экранированные символы `\//`
+//  - `//`, приклеенный к слову без пробела (`http://x/a//b`)
+// Возвращает (оставшийся текст, открылся_ли_многострочный_комментарий).
+fn strip_line_comments(line: &str) -> (String, bool) {
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    let mut in_code = false;
+
+    while i < chars.len() {
+        let c = chars[i];
+
+        if c == '\\' && i + 1 < chars.len() {
+            out.push(c);
+            out.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+
+        if c == '`' {
+            in_code = !in_code;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+
+        if !in_code && c == '/' {
+            match chars.get(i + 1).copied() {
+                Some('/') => {
+                    let prev = if i == 0 { None } else { Some(chars[i - 1]) };
+                    let is_comment = match prev {
+                        // начало строки — всегда комментарий
+                        None => true,
+                        // пробел/табуляция перед `//` — комментарий
+                        Some(p) if p.is_whitespace() => true,
+                        // `scheme://`, `a//b` — часть адреса, не комментарий
+                        _ => false,
+                    };
+                    if is_comment {
+                        return (out, false);
+                    }
+                    out.push(c);
+                    i += 1;
+                    continue;
+                }
+                Some('*') => {
+                    let mut j = i + 2;
+                    let mut closed = false;
+                    while j + 1 < chars.len() {
+                        if chars[j] == '*' && chars[j + 1] == '/' {
+                            closed = true;
+                            j += 2;
+                            break;
+                        }
+                        j += 1;
+                    }
+                    if closed {
+                        i = j;
+                        continue;
+                    }
+                    return (out, true);
+                }
+                _ => {}
+            }
+        }
+
+        out.push(c);
+        i += 1;
+    }
+
+    (out, false)
 }
 
 fn trim_empty(lines: &[String]) -> Vec<String> {
@@ -1494,4 +1567,73 @@ fn superscript_digits(s: &str) -> String {
             other => other,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_comments;
+
+    #[test]
+    fn keeps_url_double_slash() {
+        let lines = strip_comments("[site](tmutp://tnet.example/index.tmkup)");
+        assert_eq!(lines, vec!["[site](tmutp://tnet.example/index.tmkup)"]);
+    }
+
+    #[test]
+    fn keeps_url_in_plain_text() {
+        let lines = strip_comments("Go to https://tnet.example/page now");
+        assert_eq!(lines, vec!["Go to https://tnet.example/page now"]);
+    }
+
+    #[test]
+    fn strips_line_comment() {
+        let lines = strip_comments("Hello // comment");
+        assert_eq!(lines, vec!["Hello"]);
+    }
+
+    #[test]
+    fn strips_comment_at_start() {
+        let lines = strip_comments("// just a comment\nBody");
+        assert_eq!(lines, vec!["Body"]);
+    }
+
+    #[test]
+    fn keeps_double_slash_in_inline_code() {
+        let lines = strip_comments("Путь `a // b` тут");
+        assert_eq!(lines, vec!["Путь `a // b` тут"]);
+    }
+
+    #[test]
+    fn keeps_escaped_double_slash() {
+        let lines = strip_comments("a \\// b");
+        assert_eq!(lines, vec!["a \\// b"]);
+    }
+
+    #[test]
+    fn keeps_comment_markers_inside_fence() {
+        let raw = "```rust\nlet x = 1; // comment\n/* block */\n```";
+        let lines = strip_comments(raw);
+        assert_eq!(
+            lines,
+            vec!["```rust", "let x = 1; // comment", "/* block */", "```"]
+        );
+    }
+
+    #[test]
+    fn strips_block_comment_single_line() {
+        let lines = strip_comments("Before /* mid */ After");
+        assert_eq!(lines, vec!["Before  After"]);
+    }
+
+    #[test]
+    fn strips_multiline_block_comment() {
+        let lines = strip_comments("A\n/* start\nmiddle\nend */\nB");
+        assert_eq!(lines, vec!["A", "B"]);
+    }
+
+    #[test]
+    fn multiline_block_comment_trainling_text_is_kept() {
+        let lines = strip_comments("/* start\nend */ Tail");
+        assert_eq!(lines, vec!["Tail"]);
+    }
 }

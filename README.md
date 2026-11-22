@@ -111,7 +111,7 @@ Supported elements:
 | Forms | `@@ {action="…"} … @@` |
 | Tables | `\| a \| b \|` |
 | Footnotes | `[^1]`, `[^1]: text` |
-| Comments | `// line`, `/* block */` |
+| Comments | `// line`, `/* block */` (не срабатывает в `://`, внутри `` `code` `` и ` ``` `-блоков) |
 | Variables | `{{ variable }}` |
 
 ---
