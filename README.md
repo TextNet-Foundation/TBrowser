@@ -6,6 +6,8 @@
 
 A terminal-based browser for **TNet** — a decentralized text network built on lightweight text protocols. TBrowser renders **TMkUp** documents directly in your terminal, converts images to ASCII art, and provides a fast, keyboard-driven browsing experience without JavaScript, ads, or trackers.
 
+<img width="1776" height="882" alt="Снимок экрана_20261122_133850" src="https://github.com/user-attachments/assets/0166c3ac-622a-4956-978f-4078bacdb679" />
+
 ---
 
 ## Features
