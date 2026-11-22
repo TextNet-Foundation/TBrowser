@@ -42,8 +42,12 @@ impl UtnpClient {
         let mut sock = TcpStream::connect((host, port)).await
             .with_context(|| format!("connect {}:{}", host, port))?;
         sock.write_all(req.as_bytes()).await?;
+        sock.flush().await?;
 
-        // Читаем до EOF (сервер закрывает соединение — как в Python-цикле recv)
+        // Half-close: сообщаем серверу, что запрос завершён.
+        // Без этого сервер ждёт следующий запрос и не закрывает соединение.
+        sock.shutdown().await?;
+
         let mut buf = Vec::new();
         sock.read_to_end(&mut buf).await?;
 
