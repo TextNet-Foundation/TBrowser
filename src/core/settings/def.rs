@@ -119,9 +119,24 @@ impl Settings {
         }
     }
 
+    pub fn config_dir() -> Option<PathBuf> {
+        dirs::config_dir().map(|dir| dir.join("tbrowser"))
+    }
+
     pub fn config_path() -> Option<PathBuf> {
-        let home = std::env::var("HOME").ok()?;
-        Some(PathBuf::from(home).join(".config/tbrowser/settings.toml"))
+        Some(Self::config_dir()?.join("settings.toml"))
+    }
+
+    pub fn client_error_templates_dir() -> Option<PathBuf> {
+        Some(Self::config_dir()?.join("cetemplates"))
+    }
+
+    pub fn standard_client_error_template_path() -> Option<PathBuf> {
+        Some(Self::config_dir()?.join("standard_ce.tmkup"))
+    }
+
+    pub fn ssh_key_store_path() -> Option<PathBuf> {
+        Some(Self::config_dir()?.join("ssh/known_hosts"))
     }
 
     pub fn load() -> Self {
