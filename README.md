@@ -24,7 +24,10 @@ A terminal-based browser for **TNet** — a decentralized text network built on 
 
 ## Screenshots
 
-> Screenshots coming soon. Run TBrowser and see it in action.
+<video width="640" height="360" controls>
+  <source src="tbrowser_clip.mp4" type="video/mp4">
+  Ваш браузер не поддерживает тег video.
+</video>
 
 ---
 
