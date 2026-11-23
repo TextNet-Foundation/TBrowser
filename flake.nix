@@ -21,7 +21,7 @@
         # ← вот тут читаем Cargo.toml
         cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
 
-        # rust-version обычно пишут как "1.85", а rust-overlay хочет "1.85.0"
+        # rust-version обычно пишут как "1.88", а rust-overlay хочет "1.88.0"
         raw = cargoToml.package.rust-version;
         rustVersion =
           if builtins.match "[0-9]+\\.[0-9]+" raw != null

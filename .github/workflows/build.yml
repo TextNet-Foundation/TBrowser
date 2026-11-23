@@ -53,7 +53,7 @@ jobs:
         shell: bash
 
       - name: Build release
-        run: cargo build --release --target ${{ matrix.platform.target }}
+        run: cargo build --locked --release --target ${{ matrix.platform.target }}
 
       - name: Strip binary (Linux)
         if: matrix.platform.os == 'ubuntu-latest'

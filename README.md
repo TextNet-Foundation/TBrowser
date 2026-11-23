@@ -32,7 +32,7 @@ A terminal-based browser for **TNet** — a decentralized text network built on 
 
 ## Requirements
 
-- **Rust** 1.85+ (edition 2024)
+- **Rust** 1.88+ (edition 2024)
 - A unicode terminal with ANSI color support
 - **Linux**, **macOS**, or **Windows** (WSL recommended on Windows) 
 - *(But in general, you can use it on any OS supported by Rust 2024 / Ratatui / CrossTerm.)*
