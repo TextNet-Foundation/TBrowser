@@ -173,12 +173,6 @@ impl TmkupTheme {
     pub fn format_label(&self, label: &str) -> String {
         self.label_format.replace("{}", label)
     }
-
-    pub fn format_spoiler_line(&self, marker: &str, title: &str) -> String {
-        self.spoiler_line_format
-            .replace("{marker}", marker)
-            .replace("{title}", title)
-    }
 }
 
 impl Default for TmkupTheme {

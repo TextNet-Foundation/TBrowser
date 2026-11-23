@@ -119,13 +119,13 @@ fn strip_comments(raw: &str) -> Vec<String> {
     for line in raw.lines() {
         // Внутри ```-блока содержимое сырое: комментарии там не распознаются
         if in_fence {
-            if line.trim_start().starts_with("```") {
+            if is_fence_line(line) {
                 in_fence = false;
             }
             result.push(line.to_string());
             continue;
         }
-        if line.trim_start().starts_with("```") {
+        if is_fence_line(line) {
             in_fence = true;
             result.push(line.to_string());
             continue;
@@ -133,7 +133,6 @@ fn strip_comments(raw: &str) -> Vec<String> {
 
         if in_multiline {
             if let Some(end) = line.find("*/") {
-                in_multiline = false;
                 let (text, opened) = strip_line_comments(&line[end + 2..]);
                 in_multiline = opened;
                 let text = text.trim();
@@ -150,10 +149,24 @@ fn strip_comments(raw: &str) -> Vec<String> {
         let text = text.trim_end();
         if !text.is_empty() {
             result.push(text.to_string());
+        } else if line.trim().is_empty() {
+            // Пустая строка значима для разметки: она закрывает блоки и разделяет
+            // абзацы, поэтому сохраняем её как есть.
+            result.push(String::new());
         }
+        // Иначе строка состояла только из комментария — выбрасываем её целиком.
     }
 
     result
+}
+
+// Открывающая/закрывающая линия ``` с учётом префиксов цитаты (`> ```).
+fn is_fence_line(line: &str) -> bool {
+    let mut rest = line.trim_start();
+    while let Some(after) = rest.strip_prefix('>') {
+        rest = after.trim_start();
+    }
+    rest.starts_with("```")
 }
 
 // Убирает комментарии из одной строки, не задевая то, что комментарием не является:
@@ -258,41 +271,60 @@ fn trim_empty(lines: &[String]) -> Vec<String> {
     result
 }
 
+fn trim_blank_edges(mut lines: Vec<String>) -> Vec<String> {
+    while lines.first().is_some_and(|line| line.trim().is_empty()) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    lines
+}
+
 // ============================================================
 // Разбор строк в блоки
 // ============================================================
 
 fn parse_lines(lines: &[String], doc: &mut Document, vars: &HashMap<String, String>) {
+    parse_blocks(lines, doc, doc.root(), vars);
+}
+
+fn parse_blocks(
+    lines: &[String],
+    doc: &mut Document,
+    parent: indextree::NodeId,
+    vars: &HashMap<String, String>,
+) {
     let mut i = 0;
     while i < lines.len() {
         let stripped = lines[i].trim();
 
         if stripped.is_empty() {
-            doc.add_node(NodeData::Paragraph(Vec::new()));
+            doc.add_child(parent, NodeData::Paragraph(Vec::new()));
             i += 1;
             continue;
         }
 
         if stripped.starts_with("!!!") {
-            i = parse_info_block(lines, i, doc, vars);
+            i = parse_info_block(lines, i, doc, parent, vars);
         } else if stripped.starts_with("???") {
-            i = parse_spoiler_block(lines, i, doc, vars);
+            i = parse_spoiler_block(lines, i, doc, parent, vars);
         } else if stripped.starts_with("%%") {
-            i = parse_color_block(lines, i, doc, vars);
+            i = parse_color_block(lines, i, doc, parent, vars);
         } else if stripped.starts_with('>') {
-            i = parse_quote_block(lines, i, doc, vars);
+            i = parse_quote_block(lines, i, doc, parent, vars);
         } else if stripped.starts_with("```") {
-            i = parse_code_block(lines, i, doc);
+            i = parse_code_block(lines, i, doc, parent);
         } else if stripped.starts_with('|') {
-            i = parse_table_block(lines, i, doc, vars);
+            i = parse_table_block(lines, i, doc, parent, vars);
         } else if stripped.starts_with("@@gopher-type") {
-            i = parse_gopher_block(lines, i, doc);
+            i = parse_gopher_block(lines, i, doc, parent);
         } else if stripped.starts_with("@@") {
-            i = parse_form_block(lines, i, doc, vars);
+            i = parse_form_block(lines, i, doc, parent, vars);
         } else if is_list_item(&lines[i]) {
-            i = parse_list_block(lines, i, doc, vars);
+            i = parse_list_block(lines, i, doc, parent, vars);
         } else {
-            i = parse_normal_line(lines, i, doc, vars);
+            i = parse_normal_line(lines, i, doc, parent, vars);
         }
     }
 }
@@ -305,6 +337,7 @@ fn parse_info_block(
     lines: &[String],
     start: usize,
     doc: &mut Document,
+    parent: indextree::NodeId,
     vars: &HashMap<String, String>,
 ) -> usize {
     let stripped = lines[start].trim();
@@ -317,16 +350,19 @@ fn parse_info_block(
         _ => InfoKind::Info,
     };
 
-    let node = doc.add_node(NodeData::InfoBlock { kind });
+    let node = doc.add_child(parent, NodeData::InfoBlock { kind });
 
+    let mut inner = Vec::new();
     let mut i = start + 1;
     while i < lines.len() {
         if lines[i].trim().starts_with("!!!") {
-            return i + 1;
+            i += 1;
+            break;
         }
-        add_paragraph_to(doc, node, &lines[i], vars);
+        inner.push(lines[i].clone());
         i += 1;
     }
+    parse_blocks(&trim_blank_edges(inner), doc, node, vars);
     i
 }
 
@@ -334,23 +370,27 @@ fn parse_spoiler_block(
     lines: &[String],
     start: usize,
     doc: &mut Document,
+    parent: indextree::NodeId,
     vars: &HashMap<String, String>,
 ) -> usize {
     let stripped = lines[start].trim();
     let rest = stripped.trim_start_matches('?').trim();
     let attrs = parse_attrs(rest);
-    let title = attrs.get("title").cloned();
+    let title = attrs.get("title").map(|t| parse_inline(t, vars));
 
-    let node = doc.add_node(NodeData::Spoiler { title });
+    let node = doc.add_child(parent, NodeData::Spoiler { title });
 
+    let mut inner = Vec::new();
     let mut i = start + 1;
     while i < lines.len() {
         if lines[i].trim().starts_with("???") {
-            return i + 1;
+            i += 1;
+            break;
         }
-        add_paragraph_to(doc, node, &lines[i], vars);
+        inner.push(lines[i].clone());
         i += 1;
     }
+    parse_blocks(&trim_blank_edges(inner), doc, node, vars);
     i
 }
 
@@ -358,6 +398,7 @@ fn parse_color_block(
     lines: &[String],
     start: usize,
     doc: &mut Document,
+    parent: indextree::NodeId,
     vars: &HashMap<String, String>,
 ) -> usize {
     let stripped = lines[start].trim();
@@ -374,16 +415,19 @@ fn parse_color_block(
         _ => ColorBorder::Rounded,
     };
 
-    let node = doc.add_node(NodeData::ColorBlock { color, border });
+    let node = doc.add_child(parent, NodeData::ColorBlock { color, border });
 
+    let mut inner = Vec::new();
     let mut i = start + 1;
     while i < lines.len() {
         if lines[i].trim().starts_with("%%") {
-            return i + 1;
+            i += 1;
+            break;
         }
-        add_paragraph_to(doc, node, &lines[i], vars);
+        inner.push(lines[i].clone());
         i += 1;
     }
+    parse_blocks(&trim_blank_edges(inner), doc, node, vars);
     i
 }
 
@@ -391,41 +435,44 @@ fn parse_quote_block(
     lines: &[String],
     start: usize,
     doc: &mut Document,
+    parent: indextree::NodeId,
     vars: &HashMap<String, String>,
 ) -> usize {
     let mut cite = None;
     let mut date = None;
 
     let first = lines[start].trim();
-    let after_gt = first.trim_start_matches('>').trim();
+    let after_gt = first.strip_prefix('>').unwrap_or(first).trim();
     if after_gt.starts_with('{') && after_gt.contains('}') {
         let attrs = parse_attrs(after_gt);
         cite = attrs.get("cite").cloned();
         date = attrs.get("date").cloned();
     }
 
-    let node = doc.add_node(NodeData::BlockQuote { cite, date });
+    let node = doc.add_child(parent, NodeData::BlockQuote { cite, date });
 
+    let mut inner = Vec::new();
     let mut i = start;
-    while i < lines.len() && lines[i].trim().starts_with('>') {
+    while i < lines.len() {
         let line = lines[i].trim();
-        let after = line.trim_start_matches('>').trim();
+        let Some(after) = line.strip_prefix('>') else {
+            break;
+        };
+        let after = after.strip_prefix(' ').unwrap_or(after);
 
-        if after.starts_with('{') && after.contains('}') && i == start {
+        if i == start && after.trim().starts_with('{') && after.contains('}') {
             i += 1;
             continue;
         }
 
-        let spans = parse_inline(after, vars);
-        if !spans.is_empty() {
-            doc.add_child(node, NodeData::Paragraph(spans));
-        }
+        inner.push(after.to_string());
         i += 1;
     }
+    parse_blocks(&trim_blank_edges(inner), doc, node, vars);
     i
 }
 
-fn parse_code_block(lines: &[String], start: usize, doc: &mut Document) -> usize {
+fn parse_code_block(lines: &[String], start: usize, doc: &mut Document, parent: indextree::NodeId) -> usize {
     let header = lines[start].trim().trim_start_matches('`').trim();
     let language = if header.is_empty() {
         None
@@ -444,7 +491,7 @@ fn parse_code_block(lines: &[String], start: usize, doc: &mut Document) -> usize
         i += 1;
     }
 
-    doc.add_node(NodeData::CodeBlock {
+    doc.add_child(parent, NodeData::CodeBlock {
         language,
         text: content.join("\n"),
     });
@@ -456,6 +503,7 @@ fn parse_table_block(
     lines: &[String],
     start: usize,
     doc: &mut Document,
+    parent: indextree::NodeId,
     vars: &HashMap<String, String>,
 ) -> usize {
     let mut table_lines = Vec::new();
@@ -468,7 +516,7 @@ fn parse_table_block(
     if table_lines.len() < 2 {
         for line in &table_lines {
             let spans = parse_inline(line, vars);
-            doc.add_node(NodeData::Paragraph(spans));
+            doc.add_child(parent, NodeData::Paragraph(spans));
         }
         return i;
     }
@@ -506,7 +554,7 @@ fn parse_table_block(
         rows.push(row);
     }
 
-    doc.add_node(NodeData::Table {
+    doc.add_child(parent, NodeData::Table {
         headers,
         rows,
         alignments,
@@ -515,7 +563,7 @@ fn parse_table_block(
     i
 }
 
-fn parse_gopher_block(lines: &[String], start: usize, doc: &mut Document) -> usize {
+fn parse_gopher_block(lines: &[String], start: usize, doc: &mut Document, parent: indextree::NodeId) -> usize {
     let header = lines[start].trim().to_string();
     let mut content = Vec::new();
     let mut i = start + 1;
@@ -527,7 +575,7 @@ fn parse_gopher_block(lines: &[String], start: usize, doc: &mut Document) -> usi
         content.push(lines[i].clone());
         i += 1;
     }
-    doc.add_node(NodeData::GopherBlock {
+    doc.add_child(parent, NodeData::GopherBlock {
         header,
         lines: content,
     });
@@ -542,6 +590,7 @@ fn parse_form_block(
     lines: &[String],
     start: usize,
     doc: &mut Document,
+    parent: indextree::NodeId,
     vars: &HashMap<String, String>,
 ) -> usize {
     let stripped = lines[start].trim();
@@ -585,7 +634,7 @@ fn parse_form_block(
         i += 1;
     }
 
-    doc.add_node(NodeData::Form {
+    doc.add_child(parent, NodeData::Form {
         action,
         method,
         items,
@@ -602,24 +651,25 @@ fn parse_normal_line(
     lines: &[String],
     i: usize,
     doc: &mut Document,
+    parent: indextree::NodeId,
     vars: &HashMap<String, String>,
 ) -> usize {
     let line = &lines[i];
     let stripped = line.trim();
 
     if stripped == "---" {
-        doc.add_node(NodeData::HorizontalRule { thick: false });
+        doc.add_child(parent, NodeData::HorizontalRule { thick: false });
         return i + 1;
     }
     if stripped == "***" {
-        doc.add_node(NodeData::HorizontalRule { thick: true });
+        doc.add_child(parent, NodeData::HorizontalRule { thick: true });
         return i + 1;
     }
 
     if let Some(level) = heading_level(stripped) {
         let text = stripped.trim_start_matches('#').trim_end_matches('#').trim();
         let spans = parse_inline(text, vars);
-        doc.add_node(NodeData::Heading { level, spans });
+        doc.add_child(parent, NodeData::Heading { level, spans });
         return i + 1;
     }
 
@@ -636,18 +686,18 @@ fn parse_normal_line(
         }];
         spans.push(Span::raw(" — "));
         spans.extend(parse_inline(&text, vars));
-        doc.add_node(NodeData::Paragraph(spans));
+        doc.add_child(parent, NodeData::Paragraph(spans));
         return i + 1;
     }
 
     if let Some(text) = stripped.strip_prefix(':') {
         let spans = parse_inline(text.trim(), vars);
-        doc.add_node(NodeData::Definition { term: spans });
+        doc.add_child(parent, NodeData::Definition { term: spans });
         return i + 1;
     }
 
     if let Some((alt, src, width, height)) = try_parse_image(stripped, vars) {
-        doc.add_node(NodeData::Image {
+        doc.add_child(parent, NodeData::Image {
             alt,
             src,
             width,
@@ -658,26 +708,11 @@ fn parse_normal_line(
 
     let spans = parse_inline(stripped, vars);
     if !spans.is_empty() {
-        doc.add_node(NodeData::Paragraph(spans));
+        doc.add_child(parent, NodeData::Paragraph(spans));
     }
     i + 1
 }
 
-fn add_paragraph_to(
-    doc: &mut Document,
-    parent: indextree::NodeId,
-    line: &str,
-    vars: &HashMap<String, String>,
-) {
-    let stripped = line.trim();
-    if stripped.is_empty() {
-        return;
-    }
-    let spans = parse_inline(stripped, vars);
-    if !spans.is_empty() {
-        doc.add_child(parent, NodeData::Paragraph(spans));
-    }
-}
 
 // ============================================================
 // Вспомогательное для строк
@@ -790,6 +825,7 @@ fn parse_list_block(
     lines: &[String],
     start: usize,
     doc: &mut Document,
+    parent: indextree::NodeId,
     vars: &HashMap<String, String>,
 ) -> usize {
     let mut end = start;
@@ -839,7 +875,7 @@ fn parse_list_block(
         };
 
         let spans = parse_inline(text, vars);
-        doc.add_node(NodeData::ListItem {
+        doc.add_child(parent, NodeData::ListItem {
             indent,
             marker,
             spans,
@@ -1571,7 +1607,10 @@ fn superscript_digits(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_comments;
+    use super::{parse_lines, strip_comments, trim_empty};
+    use crate::core::document::{Document, NodeData};
+    use indextree::NodeId;
+    use std::collections::HashMap;
 
     #[test]
     fn keeps_url_double_slash() {
@@ -1636,4 +1675,152 @@ mod tests {
         let lines = strip_comments("/* start\nend */ Tail");
         assert_eq!(lines, vec!["Tail"]);
     }
+
+    #[test]
+    fn keeps_blank_lines() {
+        let lines = strip_comments("para one\n\npara two");
+        assert_eq!(lines, vec!["para one", "", "para two"]);
+    }
+
+    #[test]
+    fn comment_only_line_does_not_create_blank() {
+        let lines = strip_comments("a\n// note\nb");
+        assert_eq!(lines, vec!["a", "b"]);
+    }
+
+    fn parse_doc(raw: &str) -> Document {
+        let mut doc = Document::new("text/tmkup");
+        let lines = strip_comments(raw);
+        let lines = trim_empty(&lines);
+        parse_lines(&lines, &mut doc, &HashMap::new());
+        doc
+    }
+
+    fn find_node(doc: &Document, pred: impl Fn(&NodeData) -> bool) -> Option<NodeId> {
+        for (id, node) in doc.iter() {
+            if pred(node) {
+                return Some(id);
+            }
+        }
+        None
+    }
+
+    fn has_child_heading(doc: &Document, parent: NodeId) -> bool {
+        for (_, node) in doc.children(parent) {
+            if matches!(node, NodeData::Heading { .. }) {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn heading_inside_info_block() {
+        let doc = parse_doc("!!!\n# Title\nBody\n!!!");
+        let info = find_node(&doc, |n| matches!(n, NodeData::InfoBlock { .. })).unwrap();
+        assert!(has_child_heading(&doc, info));
+    }
+
+    #[test]
+    fn list_inside_quote_block() {
+        let doc = parse_doc("> intro\n> - one\n> - two");
+        let quote = find_node(&doc, |n| matches!(n, NodeData::BlockQuote { .. })).unwrap();
+        let mut items = 0;
+        for (_, node) in doc.children(quote) {
+            if matches!(node, NodeData::ListItem { .. }) {
+                items += 1;
+            }
+        }
+        assert_eq!(items, 2);
+    }
+
+    #[test]
+    fn quote_inside_info_block() {
+        let doc = parse_doc("!!!\n> # Q\n> text\n!!!");
+        let info = find_node(&doc, |n| matches!(n, NodeData::InfoBlock { .. })).unwrap();
+        let mut quote = None;
+        for (id, node) in doc.children(info) {
+            if matches!(node, NodeData::BlockQuote { .. }) {
+                quote = Some(id);
+            }
+        }
+        assert!(has_child_heading(&doc, quote.unwrap()));
+    }
+
+    #[test]
+    fn block_after_info_block_is_parsed_normally() {
+        let doc = parse_doc("!!!\nbody\n!!!\n# After");
+        let mut level_one = 0;
+        for (_, node) in doc.iter() {
+            if matches!(node, NodeData::Heading { level: 1, .. }) {
+                level_one += 1;
+            }
+        }
+        assert_eq!(level_one, 1);
+    }
+
+    #[test]
+    fn nested_quote_keeps_heading() {
+        let doc = parse_doc("> > # Deep\n> > text");
+        let outer = find_node(&doc, |n| matches!(n, NodeData::BlockQuote { .. })).unwrap();
+        let mut inner = None;
+        for (id, node) in doc.children(outer) {
+            if matches!(node, NodeData::BlockQuote { .. }) {
+                inner = Some(id);
+            }
+        }
+        assert!(has_child_heading(&doc, inner.unwrap()));
+    }
+
+    #[test]
+    fn code_block_inside_quote_keeps_slashes() {
+        let doc = parse_doc("> ```\n> let x = 1; // code\n> ```");
+        let code = find_node(&doc, |n| matches!(n, NodeData::CodeBlock { .. })).unwrap();
+        match doc.get(code) {
+            Some(NodeData::CodeBlock { text, .. }) => {
+                assert_eq!(text.as_str(), "let x = 1; // code");
+            }
+            _ => panic!("expected code block"),
+        }
+    }
+
+    #[test]
+    fn blank_line_inside_info_block_keeps_spacing() {
+        let doc = parse_doc("!!!\ntext\n\nmore\n!!!");
+        let info = find_node(&doc, |n| matches!(n, NodeData::InfoBlock { .. })).unwrap();
+        let mut empty_paragraph = false;
+        for (_, node) in doc.children(info) {
+            if matches!(node, NodeData::Paragraph(spans) if spans.is_empty()) {
+                empty_paragraph = true;
+            }
+        }
+        assert!(empty_paragraph);
+    }
+    #[test]
+    fn spoiler_title_keeps_inline_formatting() {
+        let doc = parse_doc("??? {title=\"**Bold** and plain\"}\nbody\n???");
+        let title = find_node(&doc, |n| matches!(n, NodeData::Spoiler { .. }))
+            .and_then(|id| match doc.get(id) {
+                Some(NodeData::Spoiler { title }) => title.clone(),
+                _ => None,
+            })
+            .expect("spoiler title");
+        assert_eq!(title.len(), 2, "{title:?}");
+        assert_eq!(title[0].text, "Bold");
+        assert!(title[0].style.bold);
+        assert_eq!(title[1].text, " and plain");
+        assert!(!title[1].style.bold);
+    }
+
+    #[test]
+    fn spoiler_without_title_has_no_spans() {
+        let doc = parse_doc("???\nbody\n???");
+        let title = find_node(&doc, |n| matches!(n, NodeData::Spoiler { .. }))
+            .and_then(|id| match doc.get(id) {
+                Some(NodeData::Spoiler { title }) => Some(title.is_none()),
+                _ => None,
+            });
+        assert_eq!(title, Some(true));
+    }
+
 }

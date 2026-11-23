@@ -126,6 +126,16 @@ fn render_children(doc: &Document, parent: NodeId, out: &mut Out, ctx: &Ctx) {
     }
 }
 
+fn render_child_lines(doc: &Document, parent: NodeId, ctx: &Ctx) -> Vec<Line<'static>> {
+    let mut sub = Out::new();
+    render_children(doc, parent, &mut sub, ctx);
+    sub.lines
+}
+
+fn line_width(line: &Line<'static>) -> usize {
+    line.spans.iter().map(|s| s.content.chars().count()).sum()
+}
+
 fn render_node(doc: &Document, id: NodeId, node: &NodeData, out: &mut Out, ctx: &Ctx) {
     let theme = ctx.theme;
 
@@ -244,12 +254,7 @@ fn render_node(doc: &Document, id: NodeId, node: &NodeData, out: &mut Out, ctx: 
         },
 
         NodeData::BlockQuote { cite, date } => {
-            let mut content: Vec<Vec<Span>> = Vec::new();
-            for (_, child) in doc.children(id) {
-                if let NodeData::Paragraph(spans) = child {
-                    content.push(spans.clone());
-                }
-            }
+            let mut content = render_child_lines(doc, id, ctx);
 
             if let Some(c) = cite {
                 let author_text = match date {
@@ -257,29 +262,21 @@ fn render_node(doc: &Document, id: NodeId, node: &NodeData, out: &mut Out, ctx: 
                     None => format!("— {}", c),
                 };
 
-                let mut max_len = 0usize;
-                for spans in &content {
-                    let len: usize = spans.iter().map(|s| s.text.chars().count()).sum();
-                    if len > max_len {
-                        max_len = len;
-                    }
-                }
+                let max_len = content.iter().map(line_width).max().unwrap_or(0);
                 let author_len = author_text.chars().count();
                 let padding = max_len.saturating_sub(author_len);
                 let padded = format!("{}{}", " ".repeat(padding), author_text);
 
-                content.push(vec![Span::raw(padded)]);
+                content.push(Line::from(padded));
             }
 
-            let frame = build_frame(
+            let frame = build_frame_lines(
                 "",
                 &content,
                 theme.quote_fg,
                 theme.quote_fg,
                 Color::Black,
                 theme.quote_border,
-                None,
-                theme,
             );
             out.extend_normal(frame);
         }
@@ -291,78 +288,63 @@ fn render_node(doc: &Document, id: NodeId, node: &NodeData, out: &mut Out, ctx: 
                 InfoKind::Success => (" OK ", theme.success_fg),
                 InfoKind::Error => ("ERR ", theme.error_fg),
             };
-            let mut content: Vec<Vec<Span>> = Vec::new();
-            for (_, child) in doc.children(id) {
-                if let NodeData::Paragraph(spans) = child {
-                    content.push(spans.clone());
-                }
-            }
+            let content = render_child_lines(doc, id, ctx);
             let label_fmt = theme.format_label(label);
-            let frame = build_frame(
+            let frame = build_frame_lines(
                 &label_fmt,
                 &content,
                 color,
                 color,
                 Color::White,
                 theme.info_border,
-                Some(color),
-                theme,
             );
             out.extend_normal(frame);
         }
 
         NodeData::ColorBlock { color, border } => {
-            let mut content: Vec<Vec<Span>> = Vec::new();
-            for (_, child) in doc.children(id) {
-                if let NodeData::Paragraph(spans) = child {
-                    content.push(spans.clone());
-                }
-            }
+            let content = render_child_lines(doc, id, ctx);
             let border_style = match border {
                 ColorBorder::Left => BlockBorder::Left,
                 ColorBorder::Rounded => BlockBorder::Rounded,
             };
-            let frame = build_frame(
+            let frame = build_frame_lines(
                 "",
                 &content,
                 *color,
                 *color,
                 Color::Black,
                 border_style,
-                Some(*color),
-                theme,
             );
             out.extend_normal(frame);
         }
 
         NodeData::Spoiler { title } => {
             let expanded = ctx.state.spoilers.get(&id).copied().unwrap_or(false);
-            let t = title.as_deref().unwrap_or("Спойлер");
             let marker = if expanded { "▼" } else { "▶" };
-            let header = theme.format_spoiler_line(marker, t);
+            let default_title = [Span::raw("Спойлер")];
+            let title_spans = title.as_deref().unwrap_or(&default_title);
+            let header = spoiler_header_line(
+                &theme.spoiler_line_format,
+                marker,
+                title_spans,
+                theme,
+            );
 
-            let mut content: Vec<Vec<Span>> = Vec::new();
-            content.push(vec![Span::raw(header)]);
+            let mut content = vec![header];
 
             if expanded {
-                content.push(vec![Span::raw("")]);
-                for (_, child) in doc.children(id) {
-                    if let NodeData::Paragraph(spans) = child {
-                        content.push(spans.clone());
-                    }
-                }
+                content.push(Line::from(""));
+                content.extend(render_child_lines(doc, id, ctx));
             }
 
             let label = theme.format_label("SPOILER");
-            let frame = build_frame(
+            let frame = build_frame_lines(
                 &label,
                 &content,
                 theme.spoiler_fg,
                 theme.spoiler_fg,
                 Color::Black,
                 theme.spoiler_border,
-                None,
-                theme,
             );
 
             for (i, line) in frame.into_iter().enumerate() {
@@ -546,6 +528,70 @@ fn build_frame(
     }
 
     // bottom line
+    let bottom = format!("{}{}{}", bl, h.to_string().repeat(width), br);
+    out.push(Line::from(RatSpan::styled(bottom, border_style)));
+
+    out
+}
+
+fn build_frame_lines(
+    label: &str,
+    content: &[Line<'static>],
+    border_color: Color,
+    label_bg: Color,
+    label_fg: Color,
+    border: BlockBorder,
+) -> Vec<Line<'static>> {
+    let (tl, tr, bl, br, h, v) = border.chars();
+    let border_style = Style::default().fg(border_color);
+
+    if border.is_left_only() {
+        return content
+            .iter()
+            .map(|line| {
+                let mut rat = vec![RatSpan::styled(format!("{} ", v), border_style)];
+                rat.extend(line.spans.iter().cloned());
+                Line::from(rat)
+            })
+            .collect();
+    }
+
+    let content_width = content.iter().map(line_width).max().unwrap_or(0);
+    let label_len = label.chars().count();
+    let min_width = if label.is_empty() { 4 } else { label_len + 3 };
+    let width = (content_width + 6).max(min_width);
+    let inner = width - 6;
+
+    let mut out = Vec::new();
+
+    let mut top: Vec<RatSpan<'static>> = Vec::new();
+    top.push(RatSpan::styled(format!("{}{}", tl, h), border_style));
+    if !label.is_empty() {
+        top.push(RatSpan::styled(
+            label.to_string(),
+            Style::default().fg(label_fg).bg(label_bg),
+        ));
+        let after_len = width - 2 - label_len;
+        let after = format!("{}{}", h.to_string().repeat(after_len + 1), tr);
+        top.push(RatSpan::styled(after, border_style));
+    } else {
+        let after = format!("{}{}", h.to_string().repeat(width - 1), tr);
+        top.push(RatSpan::styled(after, border_style));
+    }
+    out.push(Line::from(top));
+
+    for line in content {
+        let mut rat: Vec<RatSpan<'static>> = Vec::new();
+        rat.push(RatSpan::styled(format!("{}   ", v), border_style));
+        let used = line_width(line);
+        rat.extend(line.spans.iter().cloned());
+        if used < inner {
+            rat.push(RatSpan::raw(" ".repeat(inner - used)));
+        }
+        rat.push(RatSpan::styled(format!("   {}", v), border_style));
+        out.push(Line::from(rat));
+    }
+
     let bottom = format!("{}{}{}", bl, h.to_string().repeat(width), br);
     out.push(Line::from(RatSpan::styled(bottom, border_style)));
 
@@ -868,6 +914,25 @@ fn field_to_lines(
     }
 }
 
+fn spoiler_header_line(
+    format: &str,
+    marker: &str,
+    title: &[Span],
+    theme: &TmkupTheme,
+) -> Line<'static> {
+    let mut spans: Vec<RatSpan<'static>> = Vec::new();
+    for (i, part) in format.split("{title}").enumerate() {
+        if i > 0 {
+            spans.extend(spans_to_ratatui(title, theme));
+        }
+        let text = part.replace("{marker}", marker);
+        if !text.is_empty() {
+            spans.push(RatSpan::raw(text));
+        }
+    }
+    Line::from(spans)
+}
+
 fn spans_to_ratatui(spans: &[Span], theme: &TmkupTheme) -> Vec<RatSpan<'static>> {
     spans
         .iter()
@@ -908,4 +973,57 @@ fn span_style(s: &Span, theme: &TmkupTheme) -> Style {
         st = st.fg(theme.link_fg).add_modifier(Modifier::UNDERLINED);
     }
     st
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::parser::get_parser;
+
+    async fn render_to_string(markup: &str) -> String {
+        let settings = Settings::new();
+        let parser = get_parser("text/tmkup");
+        let doc = parser.parse(markup, "text/tmkup").await;
+        let renderer = TmkupRenderer::new(&settings);
+        let rendered = renderer
+            .render(&doc, "tmutp://example.tnet/", 80, &RenderState::default())
+            .await
+            .unwrap();
+        rendered
+            .text
+            .lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn heading_and_body_inside_info_block_are_rendered() {
+        let out = render_to_string("!!!\n# Title\nBody\n!!!").await;
+        assert!(out.contains("INFO"), "{out}");
+        assert!(out.contains("Title"), "{out}");
+        assert!(out.contains("Body"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn list_inside_quote_block_is_rendered() {
+        let out = render_to_string("> intro\n> - one\n> - two").await;
+        assert!(out.contains("intro"), "{out}");
+        assert!(out.contains("• one"), "{out}");
+        assert!(out.contains("• two"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn nested_quote_heading_is_rendered() {
+        let out = render_to_string("> > # Deep\n> > text").await;
+        assert!(out.contains("Deep"), "{out}");
+        assert!(out.contains("text"), "{out}");
+    }
+    #[tokio::test]
+    async fn spoiler_title_formatting_is_applied() {
+        let out = render_to_string("??? {title=\"**Bold** and plain\"}\nbody\n???").await;
+        assert!(out.contains("[▶] Bold and plain"), "{out}");
+        assert!(!out.contains("**"), "{out}");
+    }
+
 }

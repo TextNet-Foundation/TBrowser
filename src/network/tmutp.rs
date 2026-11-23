@@ -7,9 +7,11 @@ use tokio::net::TcpStream;
 use url::Url;
 
 use crate::network::base::{
-    FetchOptions, PostCompatibleProtocol, ProgressCallback, Response, TextProtocol,
+    connect_host, FetchOptions, PostCompatibleProtocol, ProgressCallback, Response, TextProtocol,
 };
-use crate::network::utnp::negotiate_protocol;
+use crate::network::utnp::{
+    negotiate_or_default, DEFAULT_TMUTP_PORT, DEFAULT_UTNP_PORT,
+};
 
 pub struct TmutpClient;
 
@@ -63,10 +65,10 @@ impl PostCompatibleProtocol for TmutpClient {
 
 async fn resolve(url: &str) -> anyhow::Result<(String, u16, String)> {
     let parsed = Url::parse(url).context("invalid URL")?;
-    let mut host = parsed.host_str().unwrap_or("localhost").to_string();
+    let mut host = connect_host(&parsed);
     let mut port = parsed.port();
     if port.is_none() {
-        let (h, p) = negotiate_protocol(&host, "tmutp", 34).await?;
+        let (h, p) = negotiate_or_default(&host, "tmutp", DEFAULT_UTNP_PORT, DEFAULT_TMUTP_PORT).await;
         host = h;
         port = Some(p);
     }
@@ -182,3 +184,5 @@ async fn send_request(
         text,
     })
 }
+
+

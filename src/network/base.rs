@@ -2,6 +2,43 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use url::Url;
+
+/// Returns the host suitable for `TcpStream::connect`.
+///
+/// `Url::host_str()` keeps the brackets around IPv6 literals, but
+/// `ToSocketAddrs` does not accept them (`[::1]` fails to resolve).
+pub fn connect_host(parsed: &Url) -> String {
+    match parsed.host() {
+        Some(url::Host::Ipv6(ip)) => ip.to_string(),
+        Some(url::Host::Ipv4(ip)) => ip.to_string(),
+        Some(url::Host::Domain(domain)) => domain.to_string(),
+        None => "localhost".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connect_host_strips_ipv6_brackets() {
+        let parsed = Url::parse("tbip://[::1]:1234/page").unwrap();
+        assert_eq!(connect_host(&parsed), "::1");
+    }
+
+    #[test]
+    fn connect_host_keeps_ipv4_and_domain() {
+        assert_eq!(
+            connect_host(&Url::parse("tmutp://192.0.2.1/p").unwrap()),
+            "192.0.2.1"
+        );
+        assert_eq!(
+            connect_host(&Url::parse("tmutp://example.com:1234/p").unwrap()),
+            "example.com"
+        );
+    }
+}
 
 #[derive(Debug, Clone)]
 #[allow(unused)]

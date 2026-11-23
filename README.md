@@ -86,7 +86,7 @@ tbrowser
 
 Then type URLs directly in the address bar.
 
-> **Note:** UTNP is a discovery protocol and cannot be used in URLs. It runs on port 34 and is used internally to negotiate which protocol the client should connect to. TBrowser handles this automatically when resolving TNet addresses.
+> **Note:** UTNP is a discovery protocol and cannot be used in URLs. It runs on port 34 and is used internally to negotiate which protocol the client should connect to. TBrowser handles this automatically when resolving TNet addresses. If UTNP is unreachable, times out, or reports an endpoint running a protocol version this client cannot use, resolution falls back to the protocol's default port on the address host (`100` for TMUTP, `81` for TBIP).
 
 ---
 
@@ -107,7 +107,9 @@ Supported elements:
 | Code | `` `inline` ``, ` ```lang ` |
 | Info blocks | `!!! {type="info"} … !!!` |
 | Color blocks | `%% {color="blue"} … %%` |
-| Spoilers | `??? {title="…"} … ???` |
+| Spoilers | `??? {title="…"} … ???` (title supports inline formatting, e.g. `**bold**`) |
+| Quotes | `> text` |
+| Nesting | blocks (`!!!`, `%%`, `???`, `>`) nest and accept full markup inside |
 | Forms | `@@ {action="…"} … @@` |
 | Tables | `\| a \| b \|` |
 | Footnotes | `[^1]`, `[^1]: text` |

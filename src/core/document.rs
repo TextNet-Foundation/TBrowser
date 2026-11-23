@@ -161,7 +161,7 @@ pub enum NodeData {
     BlockQuote { cite: Option<String>, date: Option<String> },
     InfoBlock { kind: InfoKind },
     ColorBlock { color: Color, border: ColorBorder },
-    Spoiler { title: Option<String> },
+    Spoiler { title: Option<Vec<Span>> },
 
     Table {
         headers: Vec<Vec<Span>>,
