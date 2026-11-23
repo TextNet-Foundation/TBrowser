@@ -100,13 +100,13 @@ Supported elements:
 |---------|--------|
 | Headings | `# H1 #` … `###### H6 ######` |
 | Styles | `*italic*`, `**bold**`, `~~strike~~`, `==highlight==` |
-| ANSI colors | `{red}…{/red}`, `{bg-blue}…{/bg-blue}` |
+| ANSI colors | `{red}…{/red}`, `{bg-blue}…{/bg-blue}` (вложенные теги возвращают внешний цвет, `{/}` сбрасывает только цвета) |
 | Lists | `- item`, `1. item`, `- [x] done` |
 | Links | `[text](url)` |
 | Images | `![alt](url {height=90})` |
 | Code | `` `inline` ``, ` ```lang ` |
 | Info blocks | `!!! {type="info"} … !!!` |
-| Color blocks | `%% {color="blue"} … %%` |
+| Color blocks | `%% {color="blue"} … %%` (цвет рамки и текста по умолчанию; inline-цвета перекрывают) |
 | Spoilers | `??? {title="…"} … ???` (title supports inline formatting, e.g. `**bold**`) |
 | Quotes | `> text` |
 | Nesting | blocks (`!!!`, `%%`, `???`, `>`) nest and accept full markup inside |

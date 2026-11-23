@@ -277,6 +277,7 @@ fn render_node(doc: &Document, id: NodeId, node: &NodeData, out: &mut Out, ctx: 
                 theme.quote_fg,
                 Color::Black,
                 theme.quote_border,
+                None,
             );
             out.extend_normal(frame);
         }
@@ -297,6 +298,7 @@ fn render_node(doc: &Document, id: NodeId, node: &NodeData, out: &mut Out, ctx: 
                 color,
                 Color::White,
                 theme.info_border,
+                Some(color),
             );
             out.extend_normal(frame);
         }
@@ -314,6 +316,7 @@ fn render_node(doc: &Document, id: NodeId, node: &NodeData, out: &mut Out, ctx: 
                 *color,
                 Color::Black,
                 border_style,
+                Some(*color),
             );
             out.extend_normal(frame);
         }
@@ -345,6 +348,7 @@ fn render_node(doc: &Document, id: NodeId, node: &NodeData, out: &mut Out, ctx: 
                 theme.spoiler_fg,
                 Color::Black,
                 theme.spoiler_border,
+                None,
             );
 
             for (i, line) in frame.into_iter().enumerate() {
@@ -541,6 +545,7 @@ fn build_frame_lines(
     label_bg: Color,
     label_fg: Color,
     border: BlockBorder,
+    content_fg: Option<Color>,
 ) -> Vec<Line<'static>> {
     let (tl, tr, bl, br, h, v) = border.chars();
     let border_style = Style::default().fg(border_color);
@@ -550,7 +555,7 @@ fn build_frame_lines(
             .iter()
             .map(|line| {
                 let mut rat = vec![RatSpan::styled(format!("{} ", v), border_style)];
-                rat.extend(line.spans.iter().cloned());
+                rat.extend(tinted_spans(line, content_fg));
                 Line::from(rat)
             })
             .collect();
@@ -584,7 +589,7 @@ fn build_frame_lines(
         let mut rat: Vec<RatSpan<'static>> = Vec::new();
         rat.push(RatSpan::styled(format!("{}   ", v), border_style));
         let used = line_width(line);
-        rat.extend(line.spans.iter().cloned());
+        rat.extend(tinted_spans(line, content_fg));
         if used < inner {
             rat.push(RatSpan::raw(" ".repeat(inner - used)));
         }
@@ -596,6 +601,21 @@ fn build_frame_lines(
     out.push(Line::from(RatSpan::styled(bottom, border_style)));
 
     out
+}
+
+fn tinted_spans(line: &Line<'static>, content_fg: Option<Color>) -> Vec<RatSpan<'static>> {
+    line.spans
+        .iter()
+        .cloned()
+        .map(|mut span| {
+            if span.style.fg.is_none() {
+                if let Some(fg) = content_fg {
+                    span.style.fg = Some(fg);
+                }
+            }
+            span
+        })
+        .collect()
 }
 
 fn render_table(
@@ -1024,6 +1044,49 @@ mod tests {
         let out = render_to_string("??? {title=\"**Bold** and plain\"}\nbody\n???").await;
         assert!(out.contains("[▶] Bold and plain"), "{out}");
         assert!(!out.contains("**"), "{out}");
+    }
+
+    #[test]
+    fn frame_tints_uncolored_content() {
+        let content = vec![Line::from(RatSpan::raw("text"))];
+        let out = build_frame_lines(
+            "",
+            &content,
+            Color::Blue,
+            Color::Blue,
+            Color::Black,
+            BlockBorder::Rounded,
+            Some(Color::Red),
+        );
+        let span = out
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.contains("text"))
+            .unwrap();
+        assert_eq!(span.style.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn frame_keeps_explicit_content_color() {
+        let content = vec![Line::from(RatSpan::styled(
+            "text",
+            Style::default().fg(Color::Green),
+        ))];
+        let out = build_frame_lines(
+            "",
+            &content,
+            Color::Blue,
+            Color::Blue,
+            Color::Black,
+            BlockBorder::Rounded,
+            Some(Color::Red),
+        );
+        let span = out
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.contains("text"))
+            .unwrap();
+        assert_eq!(span.style.fg, Some(Color::Green));
     }
 
 }

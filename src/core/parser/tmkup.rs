@@ -443,10 +443,12 @@ fn parse_quote_block(
 
     let first = lines[start].trim();
     let after_gt = first.strip_prefix('>').unwrap_or(first).trim();
-    if after_gt.starts_with('{') && after_gt.contains('}') {
+    if after_gt.starts_with('{') && after_gt.ends_with('}') {
         let attrs = parse_attrs(after_gt);
-        cite = attrs.get("cite").cloned();
-        date = attrs.get("date").cloned();
+        if attrs.contains_key("cite") || attrs.contains_key("date") {
+            cite = attrs.get("cite").cloned();
+            date = attrs.get("date").cloned();
+        }
     }
 
     let node = doc.add_child(parent, NodeData::BlockQuote { cite, date });
@@ -460,7 +462,7 @@ fn parse_quote_block(
         };
         let after = after.strip_prefix(' ').unwrap_or(after);
 
-        if i == start && after.trim().starts_with('{') && after.contains('}') {
+        if i == start && has_quote_attrs(after) {
             i += 1;
             continue;
         }
@@ -470,6 +472,15 @@ fn parse_quote_block(
     }
     parse_blocks(&trim_blank_edges(inner), doc, node, vars);
     i
+}
+
+fn has_quote_attrs(line: &str) -> bool {
+    let line = line.trim();
+    if !(line.starts_with('{') && line.ends_with('}')) {
+        return false;
+    }
+    let attrs = parse_attrs(line);
+    attrs.contains_key("cite") || attrs.contains_key("date")
 }
 
 fn parse_code_block(lines: &[String], start: usize, doc: &mut Document, parent: indextree::NodeId) -> usize {
@@ -1260,6 +1271,8 @@ fn parse_inline(text: &str, vars: &HashMap<String, String>) -> Vec<Span> {
     let mut spans: Vec<Span> = Vec::new();
     let mut buf = String::new();
     let mut style = SpanStyle::default();
+    let mut fg_stack: Vec<Option<Color>> = Vec::new();
+    let mut bg_stack: Vec<Option<Color>> = Vec::new();
     let mut i = 0;
 
     while i < chars.len() {
@@ -1338,7 +1351,7 @@ fn parse_inline(text: &str, vars: &HashMap<String, String>) -> Vec<Span> {
             '{' => {
                 if let Some((consumed, tag)) = parse_color_tag(&chars[i..]) {
                     flush(&mut spans, &mut buf, &style);
-                    apply_color_tag(&mut style, tag);
+                    apply_color_tag(&mut style, tag, &mut fg_stack, &mut bg_stack);
                     i += consumed;
                 } else {
                     buf.push('{');
@@ -1467,19 +1480,30 @@ fn parse_color_tag(chars: &[char]) -> Option<(usize, ColorTag)> {
     None
 }
 
-fn apply_color_tag(style: &mut SpanStyle, tag: ColorTag) {
+fn apply_color_tag(
+    style: &mut SpanStyle,
+    tag: ColorTag,
+    fg_stack: &mut Vec<Option<Color>>,
+    bg_stack: &mut Vec<Option<Color>>,
+) {
     match tag {
-        ColorTag::Fg(c) => style.fg = Some(c),
-        ColorTag::Bg(c) => style.bg = Some(c),
-        ColorTag::ResetAll => {
-            let keep_bold = style.bold;
-            let keep_italic = style.italic;
-            *style = SpanStyle::default();
-            style.bold = keep_bold;
-            style.italic = keep_italic;
+        ColorTag::Fg(c) => {
+            fg_stack.push(style.fg);
+            style.fg = Some(c);
         }
-        ColorTag::ResetFg => style.fg = None,
-        ColorTag::ResetBg => style.bg = None,
+        ColorTag::Bg(c) => {
+            bg_stack.push(style.bg);
+            style.bg = Some(c);
+        }
+        // `{/}` removes colors only; other attributes stay untouched.
+        ColorTag::ResetAll => {
+            style.fg = None;
+            style.bg = None;
+            fg_stack.clear();
+            bg_stack.clear();
+        }
+        ColorTag::ResetFg => style.fg = fg_stack.pop().flatten(),
+        ColorTag::ResetBg => style.bg = bg_stack.pop().flatten(),
     }
 }
 
@@ -1821,6 +1845,69 @@ mod tests {
                 _ => None,
             });
         assert_eq!(title, Some(true));
+    }
+
+    fn paragraph_spans(doc: &Document) -> Vec<crate::core::document::Span> {
+        find_node(doc, |n| matches!(n, NodeData::Paragraph(_)))
+            .and_then(|id| match doc.get(id) {
+                Some(NodeData::Paragraph(spans)) => Some(spans.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn nested_color_restores_outer_color() {
+        let doc = parse_doc("{red}a {green}b{/green} c{/red}");
+        let spans = paragraph_spans(&doc);
+        let by_text = |t: &str| {
+            spans
+                .iter()
+                .find(|s| s.text == t)
+                .map(|s| s.style.fg)
+                .unwrap()
+        };
+        assert_eq!(by_text("a "), Some(ratatui::style::Color::Red));
+        assert_eq!(by_text("b"), Some(ratatui::style::Color::Green));
+        assert_eq!(by_text(" c"), Some(ratatui::style::Color::Red));
+    }
+
+    #[test]
+    fn reset_all_clears_only_colors() {
+        let doc = parse_doc("**{red}{bg-blue}x{/}**y");
+        let spans = paragraph_spans(&doc);
+        let styled = spans.iter().find(|s| s.text == "x").unwrap();
+        assert_eq!(styled.style.fg, Some(ratatui::style::Color::Red));
+        assert_eq!(styled.style.bg, Some(ratatui::style::Color::Blue));
+        let plain = spans.iter().find(|s| s.text == "y").unwrap();
+        assert_eq!(plain.style.fg, None);
+        assert_eq!(plain.style.bg, None);
+        assert!(!plain.style.bold);
+    }
+
+    #[test]
+    fn quote_first_line_with_color_tag_is_kept() {
+        let doc = parse_doc("> {blue}q{/blue}");
+        let quote = find_node(&doc, |n| matches!(n, NodeData::BlockQuote { .. })).unwrap();
+        let count = doc.children(quote).len();
+        assert_eq!(count, 1);
+        let spans = paragraph_spans(&doc);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].text, "q");
+        assert_eq!(spans[0].style.fg, Some(ratatui::style::Color::Blue));
+    }
+
+    #[test]
+    fn quote_attrs_line_is_still_consumed() {
+        let doc = parse_doc("> {cite=\"Иван\"}\n> text");
+        let cite = find_node(&doc, |n| matches!(n, NodeData::BlockQuote { .. }))
+            .and_then(|id| match doc.get(id) {
+                Some(NodeData::BlockQuote { cite, .. }) => cite.clone(),
+                _ => None,
+            });
+        assert_eq!(cite.as_deref(), Some("Иван"));
+        let spans = paragraph_spans(&doc);
+        assert_eq!(spans[0].text, "text");
     }
 
 }
