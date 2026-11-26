@@ -1,6 +1,6 @@
 [package]
 name = "tbrowser"
-version = "1.0.0"
+version = "2.0.0-dev"
 edition = "2024"
 rust-version = "1.88"
 
@@ -13,6 +13,12 @@ anyhow = "1"
 dirs = "7"
 form_urlencoded = "1"
 async-trait = "0.1.92"
+rustls = "0.23"
+tokio-rustls = "0.26"
+rustls-native-certs = "0.8"
+russh = { version = "0.65", default-features = false, features = ["ring", "rsa"] }
+zstd = "0.13"
+bytes = "1"
 indextree = "4.9.1"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.6"

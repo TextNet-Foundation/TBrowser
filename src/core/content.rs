@@ -5,7 +5,7 @@ use crate::core::renderer::{LineMeta, RenderedContent};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Text},
     widgets::Widget,
 };
@@ -17,6 +17,8 @@ pub struct Content {
     pub meta: Vec<LineMeta>,
     pub scroll: u16,
     pub selected: u16,
+    /// Index of the link chosen with the arrow keys on the selected line.
+    pub link_focus: usize,
     pub style: Style,
     pub wrap: bool,
     selected_style: Cell<Style>,
@@ -31,6 +33,7 @@ impl Content {
             meta,
             scroll: 0,
             selected: 0,
+            link_focus: 0,
             style: Style::default(),
             wrap: true,
             selected_style: Cell::new(Style::default()),
@@ -57,6 +60,7 @@ impl Content {
         self.text = text;
         self.scroll = 0;
         self.selected = 0;
+        self.link_focus = 0;
     }
 
     pub fn set_rendered(&mut self, rendered: RenderedContent) {
@@ -64,11 +68,13 @@ impl Content {
         self.meta = rendered.meta;
         self.scroll = 0;
         self.selected = 0;
+        self.link_focus = 0;
     }
 
     pub fn up(&mut self) -> bool {
         if self.selected > 0 {
             self.selected -= 1;
+            self.link_focus = 0;
             self.ensure_visible();
             true
         } else {
@@ -80,6 +86,7 @@ impl Content {
         let max_line = self.text.lines.len().saturating_sub(1) as u16;
         if self.selected < max_line {
             self.selected += 1;
+            self.link_focus = 0;
             self.ensure_visible();
             true
         } else {
@@ -90,6 +97,7 @@ impl Content {
     pub fn page_up(&mut self) {
         let page = self.visible_source_lines();
         self.selected = self.selected.saturating_sub(page);
+        self.link_focus = 0;
         self.ensure_visible();
     }
 
@@ -97,13 +105,35 @@ impl Content {
         let page = self.visible_source_lines();
         let max_line = self.text.lines.len().saturating_sub(1) as u16;
         self.selected = self.selected.saturating_add(page).min(max_line);
+        self.link_focus = 0;
         self.ensure_visible();
     }
 
     pub fn scroll_to(&mut self, line: u16) {
         let max_line = self.text.lines.len().saturating_sub(1) as u16;
         self.selected = line.min(max_line);
+        self.link_focus = 0;
         self.ensure_visible();
+    }
+
+    /// Moves the link focus on the selected line. Returns true when the line
+    /// has more than one link, i.e. when the key was actually used.
+    pub fn cycle_link(&mut self, forward: bool) -> bool {
+        let Some(meta) = self.meta.get(self.selected as usize) else {
+            return false;
+        };
+        let count = meta.links.len();
+        if count < 2 {
+            return false;
+        }
+        self.link_focus = if forward {
+            (self.link_focus + 1) % count
+        } else if self.link_focus == 0 {
+            count - 1
+        } else {
+            self.link_focus - 1
+        };
+        true
     }
 
     fn content_area(&self, area: Rect) -> Rect {
@@ -258,10 +288,22 @@ impl Widget for &Content {
 
             let is_selected = idx as u16 == self.selected;
 
-            let rows = if self.wrap {
-                render_wrapped_line(line, inner, y, buf)
+            let focus = if is_selected {
+                self.meta
+                    .get(idx)
+                    .filter(|meta| meta.links.len() > 1)
+                    .and_then(|meta| {
+                        let link = self.link_focus.min(meta.links.len() - 1);
+                        meta.link_spans.get(link).copied()
+                    })
             } else {
-                render_truncated_line(line, inner, y, buf);
+                None
+            };
+
+            let rows = if self.wrap {
+                render_wrapped_line(line, inner, y, buf, focus)
+            } else {
+                render_truncated_line(line, inner, y, buf, focus);
                 1
             };
 
@@ -281,13 +323,27 @@ impl Widget for &Content {
     }
 }
 
-fn render_wrapped_line(line: &Line, area: Rect, start_y: u16, buf: &mut Buffer) -> u16 {
+fn link_highlight(style: Style) -> Style {
+    style.add_modifier(Modifier::UNDERLINED | Modifier::BOLD)
+}
+
+fn render_wrapped_line(
+    line: &Line,
+    area: Rect,
+    start_y: u16,
+    buf: &mut Buffer,
+    focus: Option<(usize, usize)>,
+) -> u16 {
     let mut x = area.x;
     let mut y = start_y;
     let right = area.right();
     let bottom = area.bottom();
 
-    for span in &line.spans {
+    for (idx, span) in line.spans.iter().enumerate() {
+        let style = match focus {
+            Some((a, b)) if idx >= a && idx < b => link_highlight(span.style),
+            _ => span.style,
+        };
         for ch in span.content.chars() {
             if y >= bottom {
                 return y.saturating_sub(start_y);
@@ -299,7 +355,7 @@ fn render_wrapped_line(line: &Line, area: Rect, start_y: u16, buf: &mut Buffer) 
                     return y.saturating_sub(start_y);
                 }
             }
-            buf[(x, y)].set_char(ch).set_style(span.style);
+            buf[(x, y)].set_char(ch).set_style(style);
             x = x.saturating_add(1);
         }
     }
@@ -307,18 +363,78 @@ fn render_wrapped_line(line: &Line, area: Rect, start_y: u16, buf: &mut Buffer) 
     y.saturating_sub(start_y).saturating_add(1)
 }
 
-fn render_truncated_line(line: &Line, area: Rect, y: u16, buf: &mut Buffer) {
+fn render_truncated_line(
+    line: &Line,
+    area: Rect,
+    y: u16,
+    buf: &mut Buffer,
+    focus: Option<(usize, usize)>,
+) {
     let mut x = area.x;
     let right = area.right();
 
-    'outer: for span in &line.spans {
+    'outer: for (idx, span) in line.spans.iter().enumerate() {
+        let style = match focus {
+            Some((a, b)) if idx >= a && idx < b => link_highlight(span.style),
+            _ => span.style,
+        };
         for ch in span.content.chars() {
             if x >= right {
                 break 'outer;
             }
-            buf[(x, y)].set_char(ch).set_style(span.style);
+            buf[(x, y)].set_char(ch).set_style(style);
             x = x.saturating_add(1);
         }
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::renderer::Link;
+
+    fn content_with_links() -> Content {
+        let text = Text::from(vec![Line::from("a b"), Line::from("x")]);
+        let mut content = Content::new(text);
+        content.meta = vec![
+            LineMeta::with_links_and_spans(
+                vec![
+                    Link { url: "one".into(), tooltip: None },
+                    Link { url: "two".into(), tooltip: None },
+                ],
+                vec![(0, 1), (1, 2)],
+            ),
+            LineMeta::normal(),
+        ];
+        content
+    }
+
+    #[test]
+    fn cycle_link_wraps_around() {
+        let mut content = content_with_links();
+        assert_eq!(content.link_focus, 0);
+        assert!(content.cycle_link(true));
+        assert_eq!(content.link_focus, 1);
+        assert!(content.cycle_link(true));
+        assert_eq!(content.link_focus, 0);
+        assert!(content.cycle_link(false));
+        assert_eq!(content.link_focus, 1);
+    }
+
+    #[test]
+    fn cycle_link_ignores_single_link_lines() {
+        let mut content = content_with_links();
+        content.down();
+        assert!(!content.cycle_link(true));
+        assert_eq!(content.link_focus, 0);
+    }
+
+    #[test]
+    fn moving_selection_resets_link_focus() {
+        let mut content = content_with_links();
+        content.cycle_link(true);
+        content.down();
+        assert_eq!(content.link_focus, 0);
+    }
+}

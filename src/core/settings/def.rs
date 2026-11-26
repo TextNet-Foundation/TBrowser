@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-pub const CONFIG_VERSION: u32 = 1;
+pub const CONFIG_VERSION: u32 = 2;
 pub const TBROWSER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const HEADER: &str = "# TBrowser settings configuration\n\n";
 
@@ -127,10 +127,12 @@ impl Settings {
         Some(Self::config_dir()?.join("settings.toml"))
     }
 
+    #[allow(dead_code)]
     pub fn client_error_templates_dir() -> Option<PathBuf> {
         Some(Self::config_dir()?.join("cetemplates"))
     }
 
+    #[allow(dead_code)]
     pub fn standard_client_error_template_path() -> Option<PathBuf> {
         Some(Self::config_dir()?.join("standard_ce.tmkup"))
     }

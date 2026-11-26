@@ -108,16 +108,37 @@ fn resolve_href(base_url: &str, href: &str) -> String {
     href.to_string()
 }
 
-fn collect_links(spans: &[Span], base_url: &str) -> Vec<Link> {
-    spans
-        .iter()
-        .filter_map(|s| {
-            s.link.as_ref().map(|l| Link {
-                url: resolve_href(base_url, &l.url),
-                tooltip: l.tooltip.clone(),
-            })
-        })
-        .collect()
+fn collect_links(spans: &[Span], base_url: &str) -> (Vec<Link>, Vec<(usize, usize)>) {
+    let mut links = Vec::new();
+    let mut ranges = Vec::new();
+    let mut i = 0;
+
+    while i < spans.len() {
+        let Some(link) = &spans[i].link else {
+            i += 1;
+            continue;
+        };
+
+        let url = resolve_href(base_url, &link.url);
+        let tooltip = link.tooltip.clone();
+        let start = i;
+        i += 1;
+
+        while i < spans.len() {
+            let Some(next) = &spans[i].link else {
+                break;
+            };
+            if resolve_href(base_url, &next.url) != url || next.tooltip != tooltip {
+                break;
+            }
+            i += 1;
+        }
+
+        links.push(Link { url, tooltip });
+        ranges.push((start, i));
+    }
+
+    (links, ranges)
 }
 
 fn render_children(doc: &Document, parent: NodeId, out: &mut Out, ctx: &Ctx) {
@@ -126,10 +147,14 @@ fn render_children(doc: &Document, parent: NodeId, out: &mut Out, ctx: &Ctx) {
     }
 }
 
-fn render_child_lines(doc: &Document, parent: NodeId, ctx: &Ctx) -> Vec<Line<'static>> {
+fn render_child_block(
+    doc: &Document,
+    parent: NodeId,
+    ctx: &Ctx,
+) -> (Vec<Line<'static>>, Vec<LineMeta>) {
     let mut sub = Out::new();
     render_children(doc, parent, &mut sub, ctx);
-    sub.lines
+    (sub.lines, sub.meta)
 }
 
 fn line_width(line: &Line<'static>) -> usize {
@@ -146,10 +171,10 @@ fn render_node(doc: &Document, id: NodeId, node: &NodeData, out: &mut Out, ctx: 
             if spans.is_empty() {
                 out.push_normal(Line::from(""));
             } else {
-                let links = collect_links(spans, ctx.base_url);
+                let (links, ranges) = collect_links(spans, ctx.base_url);
                 out.push(
                     Line::from(spans_to_ratatui(spans, theme)),
-                    LineMeta::with_links(links),
+                    LineMeta::with_links_and_spans(links, ranges),
                 );
             }
         }
@@ -162,7 +187,11 @@ fn render_node(doc: &Document, id: NodeId, node: &NodeData, out: &mut Out, ctx: 
                 .iter()
                 .map(|s| RatSpan::styled(sanitize(&s.text), style))
                 .collect();
-            out.push_normal(Line::from(rat));
+            let (links, ranges) = collect_links(spans, ctx.base_url);
+            out.push(
+                Line::from(rat),
+                LineMeta::with_links_and_spans(links, ranges),
+            );
         }
 
         NodeData::ListItem {
@@ -175,10 +204,16 @@ fn render_node(doc: &Document, id: NodeId, node: &NodeData, out: &mut Out, ctx: 
                 ListMarker::Ordered(path) => path.clone(),
             };
             let prefix = format!("{}{} ", "  ".repeat(*indent as usize), m);
-            let links = collect_links(spans, ctx.base_url);
+            let (links, ranges) = collect_links(spans, ctx.base_url);
             let mut rat = vec![RatSpan::raw(prefix)];
             rat.extend(spans_to_ratatui(spans, theme));
-            out.push(Line::from(rat), LineMeta::with_links(links));
+            // The list marker occupies the first span, so shift link ranges by one.
+            let ranges: Vec<(usize, usize)> =
+                ranges.into_iter().map(|(a, b)| (a + 1, b + 1)).collect();
+            out.push(
+                Line::from(rat),
+                LineMeta::with_links_and_spans(links, ranges),
+            );
         }
 
         NodeData::Definition { term } => {
@@ -187,7 +222,13 @@ fn render_node(doc: &Document, id: NodeId, node: &NodeData, out: &mut Out, ctx: 
             for s in term {
                 rat.push(RatSpan::styled(sanitize(&s.text), italic));
             }
-            out.push_normal(Line::from(rat));
+            let (links, ranges) = collect_links(term, ctx.base_url);
+            let ranges: Vec<(usize, usize)> =
+                ranges.into_iter().map(|(a, b)| (a + 1, b + 1)).collect();
+            out.push(
+                Line::from(rat),
+                LineMeta::with_links_and_spans(links, ranges),
+            );
         }
 
         NodeData::HorizontalRule { thick } => {
@@ -254,7 +295,7 @@ fn render_node(doc: &Document, id: NodeId, node: &NodeData, out: &mut Out, ctx: 
         },
 
         NodeData::BlockQuote { cite, date } => {
-            let mut content = render_child_lines(doc, id, ctx);
+            let (mut content, mut metas) = render_child_block(doc, id, ctx);
 
             if let Some(c) = cite {
                 let author_text = match date {
@@ -268,18 +309,22 @@ fn render_node(doc: &Document, id: NodeId, node: &NodeData, out: &mut Out, ctx: 
                 let padded = format!("{}{}", " ".repeat(padding), author_text);
 
                 content.push(Line::from(padded));
+                metas.push(LineMeta::normal());
             }
 
-            let frame = build_frame_lines(
+            let (frame, framed_meta) = build_frame_lines(
                 "",
                 &content,
+                &metas,
                 theme.quote_fg,
                 theme.quote_fg,
                 Color::Black,
                 theme.quote_border,
                 None,
             );
-            out.extend_normal(frame);
+            for (line, meta) in frame.into_iter().zip(framed_meta) {
+                out.push(line, meta);
+            }
         }
 
         NodeData::InfoBlock { kind } => {
@@ -289,36 +334,42 @@ fn render_node(doc: &Document, id: NodeId, node: &NodeData, out: &mut Out, ctx: 
                 InfoKind::Success => (" OK ", theme.success_fg),
                 InfoKind::Error => ("ERR ", theme.error_fg),
             };
-            let content = render_child_lines(doc, id, ctx);
+            let (content, metas) = render_child_block(doc, id, ctx);
             let label_fmt = theme.format_label(label);
-            let frame = build_frame_lines(
+            let (frame, framed_meta) = build_frame_lines(
                 &label_fmt,
                 &content,
+                &metas,
                 color,
                 color,
                 Color::White,
                 theme.info_border,
                 Some(color),
             );
-            out.extend_normal(frame);
+            for (line, meta) in frame.into_iter().zip(framed_meta) {
+                out.push(line, meta);
+            }
         }
 
         NodeData::ColorBlock { color, border } => {
-            let content = render_child_lines(doc, id, ctx);
+            let (content, metas) = render_child_block(doc, id, ctx);
             let border_style = match border {
                 ColorBorder::Left => BlockBorder::Left,
                 ColorBorder::Rounded => BlockBorder::Rounded,
             };
-            let frame = build_frame_lines(
+            let (frame, framed_meta) = build_frame_lines(
                 "",
                 &content,
+                &metas,
                 *color,
                 *color,
                 Color::Black,
                 border_style,
                 Some(*color),
             );
-            out.extend_normal(frame);
+            for (line, meta) in frame.into_iter().zip(framed_meta) {
+                out.push(line, meta);
+            }
         }
 
         NodeData::Spoiler { title } => {
@@ -334,16 +385,21 @@ fn render_node(doc: &Document, id: NodeId, node: &NodeData, out: &mut Out, ctx: 
             );
 
             let mut content = vec![header];
+            let mut metas = vec![LineMeta::normal()];
 
             if expanded {
                 content.push(Line::from(""));
-                content.extend(render_child_lines(doc, id, ctx));
+                metas.push(LineMeta::normal());
+                let (child_lines, child_metas) = render_child_block(doc, id, ctx);
+                content.extend(child_lines);
+                metas.extend(child_metas);
             }
 
             let label = theme.format_label("SPOILER");
-            let frame = build_frame_lines(
+            let (frame, mut framed_meta) = build_frame_lines(
                 &label,
                 &content,
+                &metas,
                 theme.spoiler_fg,
                 theme.spoiler_fg,
                 Color::Black,
@@ -351,12 +407,12 @@ fn render_node(doc: &Document, id: NodeId, node: &NodeData, out: &mut Out, ctx: 
                 None,
             );
 
-            for (i, line) in frame.into_iter().enumerate() {
-                if i == 1 {
-                    out.push(line, LineMeta::spoiler(id, expanded));
-                } else {
-                    out.push_normal(line);
-                }
+            if let Some(meta) = framed_meta.get_mut(1) {
+                *meta = LineMeta::spoiler(id, expanded);
+            }
+
+            for (line, meta) in frame.into_iter().zip(framed_meta) {
+                out.push(line, meta);
             }
         }
 
@@ -372,6 +428,8 @@ fn render_node(doc: &Document, id: NodeId, node: &NodeData, out: &mut Out, ctx: 
                 out,
                 theme.table_outer_border,
                 theme.table_inner_border,
+                theme,
+                ctx.base_url,
             );
         }
 
@@ -538,27 +596,38 @@ fn build_frame(
     out
 }
 
+fn shift_link_spans(meta: &LineMeta, delta: usize) -> LineMeta {
+    let mut meta = meta.clone();
+    for range in &mut meta.link_spans {
+        range.0 += delta;
+        range.1 += delta;
+    }
+    meta
+}
+
 fn build_frame_lines(
     label: &str,
     content: &[Line<'static>],
+    content_meta: &[LineMeta],
     border_color: Color,
     label_bg: Color,
     label_fg: Color,
     border: BlockBorder,
     content_fg: Option<Color>,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Vec<LineMeta>) {
     let (tl, tr, bl, br, h, v) = border.chars();
     let border_style = Style::default().fg(border_color);
 
     if border.is_left_only() {
-        return content
-            .iter()
-            .map(|line| {
-                let mut rat = vec![RatSpan::styled(format!("{} ", v), border_style)];
-                rat.extend(tinted_spans(line, content_fg));
-                Line::from(rat)
-            })
-            .collect();
+        let mut lines = Vec::new();
+        let mut metas = Vec::new();
+        for (line, meta) in content.iter().zip(content_meta.iter()) {
+            let mut rat = vec![RatSpan::styled(format!("{} ", v), border_style)];
+            rat.extend(tinted_spans(line, content_fg));
+            lines.push(Line::from(rat));
+            metas.push(shift_link_spans(meta, 1));
+        }
+        return (lines, metas);
     }
 
     let content_width = content.iter().map(line_width).max().unwrap_or(0);
@@ -568,6 +637,7 @@ fn build_frame_lines(
     let inner = width - 6;
 
     let mut out = Vec::new();
+    let mut out_meta = Vec::new();
 
     let mut top: Vec<RatSpan<'static>> = Vec::new();
     top.push(RatSpan::styled(format!("{}{}", tl, h), border_style));
@@ -584,8 +654,9 @@ fn build_frame_lines(
         top.push(RatSpan::styled(after, border_style));
     }
     out.push(Line::from(top));
+    out_meta.push(LineMeta::normal());
 
-    for line in content {
+    for (line, meta) in content.iter().zip(content_meta.iter()) {
         let mut rat: Vec<RatSpan<'static>> = Vec::new();
         rat.push(RatSpan::styled(format!("{}   ", v), border_style));
         let used = line_width(line);
@@ -595,12 +666,14 @@ fn build_frame_lines(
         }
         rat.push(RatSpan::styled(format!("   {}", v), border_style));
         out.push(Line::from(rat));
+        out_meta.push(shift_link_spans(meta, 1));
     }
 
     let bottom = format!("{}{}{}", bl, h.to_string().repeat(width), br);
     out.push(Line::from(RatSpan::styled(bottom, border_style)));
+    out_meta.push(LineMeta::normal());
 
-    out
+    (out, out_meta)
 }
 
 fn tinted_spans(line: &Line<'static>, content_fg: Option<Color>) -> Vec<RatSpan<'static>> {
@@ -625,38 +698,30 @@ fn render_table(
     out: &mut Out,
     outer: BlockBorder,
     inner: BlockBorder,
+    theme: &TmkupTheme,
+    base_url: &str,
 ) {
     let o = outer.table_chars();
     let i = inner.table_chars();
 
-    let header_texts: Vec<String> = headers
-        .iter()
-        .map(|c| c.iter().map(|s| sanitize(&s.text)).collect())
-        .collect();
-
-    let row_texts: Vec<Vec<String>> = rows
-        .iter()
-        .map(|row| {
-            row.iter()
-                .map(|c| c.iter().map(|s| sanitize(&s.text)).collect::<String>())
-                .collect()
-        })
-        .collect();
+    let cell_width = |cell: &[Span]| -> usize {
+        cell.iter().map(|s| sanitize(&s.text).chars().count()).sum()
+    };
 
     let cols = headers
         .len()
-        .max(row_texts.iter().map(|r| r.len()).max().unwrap_or(0));
+        .max(rows.iter().map(|r| r.len()).max().unwrap_or(0));
     if cols == 0 {
         return;
     }
 
     let mut widths = vec![0usize; cols];
-    for (i, h) in header_texts.iter().enumerate() {
-        widths[i] = widths[i].max(h.chars().count());
+    for (idx, header) in headers.iter().enumerate() {
+        widths[idx] = widths[idx].max(cell_width(header));
     }
-    for row in &row_texts {
-        for (i, c) in row.iter().enumerate() {
-            widths[i] = widths[i].max(c.chars().count());
+    for row in rows {
+        for (idx, cell) in row.iter().enumerate() {
+            widths[idx] = widths[idx].max(cell_width(cell));
         }
     }
 
@@ -668,35 +733,66 @@ fn render_table(
         format!("{}{}{}", l, parts.join(&m.to_string()), r)
     };
 
-    let row_str = |cells: &[String], v: char| -> String {
-        let mut parts = Vec::new();
-        for i in 0..cols {
-            let c = cells.get(i).map(String::as_str).unwrap_or("");
-            let w = widths[i];
-            let visible = c.chars().count();
-            let pad = w.saturating_sub(visible);
-            let align = alignments.get(i).copied().unwrap_or(Alignment::Left);
-            let padded = match align {
-                Alignment::Left => format!("{}{}", c, " ".repeat(pad)),
-                Alignment::Right => format!("{}{}", " ".repeat(pad), c),
-                Alignment::Center => {
-                    let left = pad / 2;
-                    let right = pad - left;
-                    format!("{}{}{}", " ".repeat(left), c, " ".repeat(right))
-                }
+    let row_line = |cells: &[Vec<Span>]| -> (Line<'static>, LineMeta) {
+        let mut rat: Vec<RatSpan<'static>> =
+            vec![RatSpan::raw(o.vertical.to_string())];
+        let mut links = Vec::new();
+        let mut ranges: Vec<(usize, usize)> = Vec::new();
+
+        for idx in 0..cols {
+            let empty: &[Span] = &[];
+            let cell = cells.get(idx).map(Vec::as_slice).unwrap_or(empty);
+            let visible = cell_width(cell);
+            let pad = widths[idx].saturating_sub(visible);
+            let align = alignments.get(idx).copied().unwrap_or(Alignment::Left);
+
+            let (left, right) = match align {
+                Alignment::Left => (0, pad),
+                Alignment::Right => (pad, 0),
+                Alignment::Center => (pad / 2, pad - pad / 2),
             };
-            parts.push(format!(" {} ", padded));
+
+            rat.push(RatSpan::raw(" "));
+            if left > 0 {
+                rat.push(RatSpan::raw(" ".repeat(left)));
+            }
+
+            let offset = rat.len();
+            rat.extend(spans_to_ratatui(cell, theme));
+
+            let (cell_links, cell_ranges) = collect_links(cell, base_url);
+            links.extend(cell_links);
+            ranges.extend(
+                cell_ranges
+                    .into_iter()
+                    .map(|(a, b)| (a + offset, b + offset)),
+            );
+
+            if right > 0 {
+                rat.push(RatSpan::raw(" ".repeat(right)));
+            }
+            rat.push(RatSpan::raw(" "));
+            if idx + 1 < cols {
+                rat.push(RatSpan::raw(o.vertical.to_string()));
+            }
         }
-        format!("{}{}{}", v, parts.join(&v.to_string()), v)
+
+        rat.push(RatSpan::raw(o.vertical.to_string()));
+        (
+            Line::from(rat),
+            LineMeta::with_links_and_spans(links, ranges),
+        )
     };
 
     out.push_normal(Line::from(make_border(o.top_left, o.top_mid, o.top_right, o.horizontal)));
-    if !header_texts.is_empty() {
-        out.push_normal(Line::from(row_str(&header_texts, o.vertical)));
+    if !headers.is_empty() {
+        let (line, meta) = row_line(headers);
+        out.push(line, meta);
         out.push_normal(Line::from(make_border(i.mid_left, i.cross, i.mid_right, i.horizontal)));
     }
-    for row in &row_texts {
-        out.push_normal(Line::from(row_str(row, o.vertical)));
+    for row in rows {
+        let (line, meta) = row_line(row);
+        out.push(line, meta);
     }
     out.push_normal(Line::from(make_border(o.bot_left, o.bot_mid, o.bot_right, o.horizontal)));
 }
@@ -999,22 +1095,84 @@ mod tests {
     use super::*;
     use crate::core::parser::get_parser;
 
-    async fn render_to_string(markup: &str) -> String {
+    async fn render_doc(markup: &str) -> RenderedContent {
         let settings = Settings::new();
         let parser = get_parser("text/tmkup");
         let doc = parser.parse(markup, "text/tmkup").await;
         let renderer = TmkupRenderer::new(&settings);
-        let rendered = renderer
+        renderer
             .render(&doc, "tmutp://example.tnet/", 80, &RenderState::default())
             .await
-            .unwrap();
-        rendered
+            .unwrap()
+    }
+
+    async fn render_to_string(markup: &str) -> String {
+        render_doc(markup)
+            .await
             .text
             .lines
             .iter()
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn line_with<'a>(rendered: &'a RenderedContent, needle: &str) -> &'a LineMeta {
+        let idx = rendered
+            .text
+            .lines
+            .iter()
+            .position(|line| line.to_string().contains(needle))
+            .unwrap_or_else(|| panic!("no line containing {needle}"));
+        &rendered.meta[idx]
+    }
+
+    #[tokio::test]
+    async fn link_inside_heading_is_collected() {
+        let rendered = render_doc("# [site](tmutp://example.tnet/)").await;
+        let meta = line_with(&rendered, "site");
+        assert_eq!(meta.links.len(), 1);
+        assert_eq!(meta.links[0].url, "tmutp://example.tnet/");
+    }
+
+    #[tokio::test]
+    async fn multiple_links_keep_separate_span_ranges() {
+        let rendered = render_doc(
+            "[a](tmutp://example.tnet/a) and [b](tmutp://example.tnet/b)",
+        )
+        .await;
+        let meta = line_with(&rendered, " and ");
+        assert_eq!(meta.links.len(), 2);
+        assert_eq!(meta.link_spans.len(), 2);
+        assert_eq!(meta.link_spans[0].0, 0);
+        assert_eq!(meta.link_spans[1].0, 2);
+    }
+
+    #[tokio::test]
+    async fn link_inside_quote_block_is_collected() {
+        let rendered = render_doc("> [site](tmutp://example.tnet/x)").await;
+        let meta = line_with(&rendered, "site");
+        assert_eq!(meta.links.len(), 1);
+        let (start, end) = meta.link_spans[0];
+        assert!(start >= 1 && start < end, "span range must be shifted");
+    }
+
+    #[tokio::test]
+    async fn link_inside_table_cell_is_collected() {
+        let rendered = render_doc(
+            "| [a](tmutp://example.tnet/a) | b |\n|---|---|\n| c | d |",
+        )
+        .await;
+        let idx = rendered
+            .meta
+            .iter()
+            .position(|meta| !meta.links.is_empty())
+            .expect("table row must carry a link");
+        let meta = &rendered.meta[idx];
+        assert_eq!(meta.links.len(), 1);
+        assert_eq!(meta.links[0].url, "tmutp://example.tnet/a");
+        let (start, end) = meta.link_spans[0];
+        assert!(start < end);
     }
 
     #[tokio::test]
@@ -1049,9 +1207,11 @@ mod tests {
     #[test]
     fn frame_tints_uncolored_content() {
         let content = vec![Line::from(RatSpan::raw("text"))];
-        let out = build_frame_lines(
+        let metas = vec![LineMeta::normal()];
+        let (out, _) = build_frame_lines(
             "",
             &content,
+            &metas,
             Color::Blue,
             Color::Blue,
             Color::Black,
@@ -1072,9 +1232,11 @@ mod tests {
             "text",
             Style::default().fg(Color::Green),
         ))];
-        let out = build_frame_lines(
+        let metas = vec![LineMeta::normal()];
+        let (out, _) = build_frame_lines(
             "",
             &content,
+            &metas,
             Color::Blue,
             Color::Blue,
             Color::Black,

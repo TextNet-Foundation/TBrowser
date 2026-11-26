@@ -1,4 +1,5 @@
 mod v1;
+mod v2;
 
 use crate::core::settings::{Settings, CONFIG_VERSION};
 
@@ -7,6 +8,7 @@ pub type Migrator = fn(from: u32, settings: &mut Settings) -> bool;
 fn current_migrator() -> Option<Migrator> {
     match CONFIG_VERSION {
         1 => Some(v1::migrate),
+        2 => Some(v2::migrate),
         _ => None,
     }
 }

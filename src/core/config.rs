@@ -1,4 +1,7 @@
+use std::path::PathBuf;
+
 use crate::core::settings::{Settings, Value};
+use crate::network::base::FetchOptions;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -10,6 +13,14 @@ pub struct Config {
     pub url_bar_hold_ms: u64,
     pub delete_confirmation: bool,
     pub form_reset: bool,
+
+    pub allow_protocols_v1: bool,
+    pub allow_unencrypted_tcp: bool,
+    pub ssh_to_tls: bool,
+    pub try_encryption_against_utnp: bool,
+    pub ask_new_ssh_key: bool,
+    pub block_changed_ssh_key: bool,
+    pub ssh_key_store: String,
 
     pub kb_info: String,
     pub kb_tabs: String,
@@ -46,6 +57,31 @@ impl Config {
         }
         if let Some(Value::Bool(b)) = settings.get("network.follow_redirects") {
             cfg.follow_redirects = *b;
+        }
+        if let Some(Value::Bool(b)) = settings.get("network.allow_protocols_v1") {
+            cfg.allow_protocols_v1 = *b;
+        }
+        if let Some(Value::Bool(b)) =
+            settings.get("network.connection.allow_unencrypted_tcp")
+        {
+            cfg.allow_unencrypted_tcp = *b;
+        }
+        if let Some(Value::Bool(b)) = settings.get("network.connection.ssh_to_tls") {
+            cfg.ssh_to_tls = *b;
+        }
+        if let Some(Value::Bool(b)) =
+            settings.get("network.connection.try_encryption_against_utnp")
+        {
+            cfg.try_encryption_against_utnp = *b;
+        }
+        if let Some(Value::Bool(b)) = settings.get("network.ssh.ask_new_ssh_key") {
+            cfg.ask_new_ssh_key = *b;
+        }
+        if let Some(Value::Bool(b)) = settings.get("network.ssh.block_changed_ssh_key") {
+            cfg.block_changed_ssh_key = *b;
+        }
+        if let Some(Value::Str(s)) = settings.get("network.ssh.ssh_key_store") {
+            cfg.ssh_key_store = s.clone();
         }
         if let Some(Value::Float(f)) = settings.get("appearance.layout.url_bar_hold") {
             cfg.url_bar_hold_ms = (f.max(0.0) * 1000.0) as u64;
@@ -99,6 +135,50 @@ impl Config {
 
         cfg
     }
+
+    pub fn fetch_options(&self) -> FetchOptions {
+        FetchOptions {
+            follow_redirects: self.follow_redirects,
+            max_redirects: 10,
+            timeout_secs: self.timeout,
+            allow_v1: self.allow_protocols_v1,
+            allow_unencrypted_tcp: self.allow_unencrypted_tcp,
+            try_encryption_against_utnp: self.try_encryption_against_utnp,
+            ssh_key_store: self.resolved_ssh_key_store(),
+        }
+    }
+
+    fn resolved_ssh_key_store(&self) -> Option<PathBuf> {
+        let raw = self.ssh_key_store.trim();
+
+        if raw.is_empty() {
+            return Settings::ssh_key_store_path();
+        }
+
+        Some(expand_path(raw))
+    }
+}
+
+fn expand_path(raw: &str) -> PathBuf {
+    if let Some(rest) = raw.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+
+    if let Some(rest) = raw.strip_prefix("$XDG_CONFIG_HOME/") {
+        if let Some(config) = dirs::config_dir() {
+            return config.join(rest);
+        }
+    }
+
+    if let Some(rest) = raw.strip_prefix("$HOME/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+
+    PathBuf::from(raw)
 }
 
 impl Default for Config {
@@ -112,6 +192,14 @@ impl Default for Config {
             url_bar_hold_ms: 300,
             delete_confirmation: true,
             form_reset: false,
+
+            allow_protocols_v1: false,
+            allow_unencrypted_tcp: false,
+            ssh_to_tls: false,
+            try_encryption_against_utnp: false,
+            ask_new_ssh_key: true,
+            block_changed_ssh_key: false,
+            ssh_key_store: "$XDG_CONFIG_HOME/tbrowser/ssh/known_hosts".to_string(),
 
             kb_info: "i".to_string(),
             kb_tabs: "t".to_string(),

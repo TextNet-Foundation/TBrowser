@@ -198,25 +198,56 @@ fn resolve_image_url(base_url: &str, src: &str) -> String {
     if src.contains("://") {
         return src.to_string();
     }
+
+    if let Ok(target) = crate::network::negotiate::Target::parse(base_url) {
+        let image_scheme = match target.transport {
+            network::base::Transport::Ssh if target.protocol == "tmutp" => "tbips",
+            network::base::Transport::Tls if target.protocol == "tmutp" => "tbip",
+            _ => {
+                return Url::parse(base_url)
+                    .ok()
+                    .and_then(|base| base.join(src).ok())
+                    .map(|url| url.to_string())
+                    .unwrap_or_else(|| src.to_string());
+            }
+        };
+
+        let host = if target.host.contains(':') {
+            format!("[{}]", target.host)
+        } else {
+            target.host.clone()
+        };
+
+        let authority = match (target.utnp_port, target.direct_port) {
+            (Some(port), _) => format!("{host}:u{port}"),
+            (None, Some(port)) => format!("{host}:{port}"),
+            (None, None) => host,
+        };
+
+        let base_path = target
+            .path_query
+            .split_once('?')
+            .map(|(path, _)| path)
+            .unwrap_or(&target.path_query);
+
+        let new_path = if src.starts_with('/') {
+            src.to_string()
+        } else if let Some(query) = src.strip_prefix('?') {
+            format!("{base_path}?{query}")
+        } else {
+            let dir = base_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+            format!("{dir}/{src}")
+        };
+
+        return format!("{image_scheme}://{authority}{new_path}");
+    }
+
     if let Ok(base) = Url::parse(base_url) {
-        if base.scheme() == "tmutp" {
-            let host = base.host_str().unwrap_or("localhost");
-            let new_path = if src.starts_with('/') {
-                src.to_string()
-            } else {
-                let dir = base
-                    .path()
-                    .rsplit_once('/')
-                    .map(|(d, _)| d)
-                    .unwrap_or("");
-                format!("{}/{}", dir, src)
-            };
-            return format!("tbip://{}{}", host, new_path);
-        }
         if let Ok(joined) = base.join(src) {
             return joined.to_string();
         }
     }
+
     src.to_string()
 }
 
@@ -238,7 +269,7 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-async fn headless_download(url: &str) -> Result<(), String> {
+async fn headless_download(url: &str, options: &FetchOptions) -> Result<(), String> {
     let filename = Url::parse(url)
         .ok()
         .and_then(|u| u.path_segments().and_then(|s| s.last()).map(|s| s.to_string()))
@@ -253,6 +284,7 @@ async fn headless_download(url: &str) -> Result<(), String> {
     let options = FetchOptions {
         follow_redirects: true,
         max_redirects: 10,
+        ..options.clone()
     };
 
     let fname_clone = filename.clone();
@@ -326,7 +358,7 @@ async fn load_image_ascii(
     src: &str,
     height_attr: Option<u16>,
     viewport_height: u16,
-    timeout_secs: u64,
+    options: &FetchOptions,
 ) -> Result<Vec<Line<'static>>, String> {
     let full_url = resolve_image_url(base_url, src);
 
@@ -335,17 +367,12 @@ async fn load_image_ascii(
 
     let client = get_protocol(scheme).ok_or_else(|| format!("unsupported scheme: {}", scheme))?;
 
-    let options = FetchOptions {
-        follow_redirects: true,
-        max_redirects: 10,
-    };
-
     let response = tokio::time::timeout(
-        Duration::from_secs(timeout_secs.max(1)),
-        client.fetch(&full_url, None, &options),
+        Duration::from_secs(options.timeout_secs.max(1)),
+        client.fetch(&full_url, None, options),
     )
     .await
-    .map_err(|_| format!("timed out after {}s", timeout_secs))?
+    .map_err(|_| format!("timed out after {}s", options.timeout_secs))?
     .map_err(|e| e.to_string())?;
 
     let img = image::load_from_memory(&response.body).map_err(|e| e.to_string())?;
@@ -419,8 +446,7 @@ async fn load_url(
     tab_index: usize,
     settings: Settings,
     viewport_width: u16,
-    timeout_secs: u64,
-    follow_redirects: bool,
+    options: FetchOptions,
     action_tx: mpsc::Sender<Action>,
     generation: u64,
 ) -> anyhow::Result<(Document, RenderedContent)> {
@@ -448,17 +474,21 @@ async fn load_url(
     let client = get_protocol(scheme)
         .ok_or_else(|| anyhow::anyhow!("unsupported scheme: {}", scheme))?;
 
-    let options = FetchOptions {
-        follow_redirects,
-        max_redirects: 10,
-    };
-
     let response = tokio::time::timeout(
-        Duration::from_secs(timeout_secs.max(1)),
+        Duration::from_secs(options.timeout_secs.max(1)),
         client.fetch(url, None, &options),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("request timed out after {}s", timeout_secs))??;
+    .map_err(|_| anyhow::anyhow!("request timed out after {}s", options.timeout_secs))??;
+
+    if !response.ok() && response.text.trim().is_empty() {
+        anyhow::bail!(
+            "Server returned {} {} ({}) with an empty body",
+            response.status_code,
+            response.status_name,
+            response.transport.as_str()
+        );
+    }
 
     let content_type = response
         .headers
@@ -630,8 +660,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli_url: Option<String> = std::env::args().nth(1).filter(|a| !a.is_empty());
 
     if let Some(url) = &cli_url {
-        if url.starts_with("tbip://") {
-            if let Err(e) = headless_download(url).await {
+        if url.starts_with("tbip://") || url.starts_with("tbips://") {
+            let cfg = Config::from_settings(&Settings::load());
+            if let Err(e) = headless_download(url, &cfg.fetch_options()).await {
                 eprintln!("\nError: {}", e);
                 std::process::exit(1);
             }
@@ -840,7 +871,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             match screen {
                 Screen::Main => {
-                    let header = Header::new("TBrowser v1.0", tabs.active_name());
+                    let header = Header::new("TBrowser v2.0", tabs.active_name());
                     header.render(header_area, frame.buffer_mut(), &global_theme);
 
                     url_bar.render(
@@ -1725,7 +1756,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         .and_then(|m| m.links.first().map(|l| l.url.clone()))
                                 });
                                 if let Some(url) = url_opt {
-                                    if url.starts_with("tbip://") {
+                                    if url.starts_with("tbip://") || url.starts_with("tbips://") {
                                         let _ = action_tx
                                             .send(Action::LoadUrl {
                                                 tab_index,
@@ -1833,7 +1864,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 }
 
                                                 LineKind::Normal => {
-                                                    if let Some(link) = meta.links.first() {
+                                                    let link = meta
+                                                        .links
+                                                        .get(tab.content.link_focus)
+                                                        .or_else(|| meta.links.first());
+                                                    if let Some(link) = link {
                                                         Decision::LoadUrl(link.url.clone())
                                                     } else {
                                                         Decision::Nothing
@@ -2189,7 +2224,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .map(|u| u.scheme().to_string())
                                             .unwrap_or_default();
 
-                                        if scheme != "tmutp" {
+                                        if !matches!(scheme.as_str(), "tmutp" | "tmutps") {
                                             if let Some(tab) = tabs.get_mut(tab_index) {
                                                 tab.interactive_state.form_errors.insert(
                                                     form_id,
@@ -2229,10 +2264,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let full_url_c = full_url.clone();
                                         let settings_c = settings_snapshot.clone();
                                         let width = viewport_width;
-                                        let timeout = config.timeout;
+                                        let options = config.fetch_options();
+                                        let post_scheme = scheme.clone();
 
                                         tokio::spawn(async move {
-                                            let client = match get_post_protocol("tmutp") {
+                                            let client = match get_post_protocol(&post_scheme) {
                                                 Some(c) => c,
                                                 None => {
                                                     let _ = tx
@@ -2253,8 +2289,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 .collect();
 
                                             let result = tokio::time::timeout(
-                                                Duration::from_secs(timeout.max(1)),
-                                                client.post(&full_url_c, &data_refs, None),
+                                                Duration::from_secs(options.timeout_secs.max(1)),
+                                                client.post(
+                                                    &full_url_c,
+                                                    &data_refs,
+                                                    None,
+                                                    &options,
+                                                ),
                                             )
                                             .await;
 
@@ -2330,7 +2371,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                             form_id,
                                                             message: format!(
                                                                 "POST timed out after {}s",
-                                                                timeout
+                                                                options.timeout_secs
                                                             ),
                                                             generation,
                                                         })
@@ -2364,6 +2405,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             if let Some(tab) = tabs.active_mut() {
                                 match key.code {
+                                    KeyCode::Left => {
+                                        tab.content.cycle_link(false);
+                                    }
+                                    KeyCode::Right => {
+                                        tab.content.cycle_link(true);
+                                    }
                                     KeyCode::Up => {
                                         tab.content.up();
                                     }
@@ -2446,7 +2493,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Action::LoadUrl { tab_index, url, mode } => {
                         inline_edit = None;
 
-                        if url.starts_with("tbip://") {
+                        if url.starts_with("tbip://") || url.starts_with("tbips://") {
                             let filename = Url::parse(&url)
                                 .ok()
                                 .and_then(|u| u.path_segments().and_then(|s| s.last()).map(|s| s.to_string()))
@@ -2455,7 +2502,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             let tx = action_tx.clone();
                             let url_c = url.clone();
-                            let timeout = config.timeout;
+                            let options = config.fetch_options();
 
                             tokio::spawn(async move {
                                 let client = match get_protocol("tbip") {
@@ -2465,12 +2512,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         return;
                                     }
                                 };
-                                let options = FetchOptions {
-                                    follow_redirects: true,
-                                    max_redirects: 10,
-                                };
                                 let result = tokio::time::timeout(
-                                    Duration::from_secs(timeout.max(1)),
+                                    Duration::from_secs(options.timeout_secs.max(1)),
                                     client.fetch(&url_c, None, &options),
                                 ).await;
 
@@ -2528,16 +2571,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let tx = action_tx.clone();
                         let settings_c = settings_view.settings.clone();
                         let width = viewport_width;
-                        let timeout = config.timeout;
-                        let follow = config.follow_redirects;
+                        let options = config.fetch_options();
                         tokio::spawn(async move {
                             match load_url(
                                 &url,
                                 tab_index,
                                 settings_c,
                                 width,
-                                timeout,
-                                follow,
+                                options,
                                 tx.clone(),
                                 generation,
                             )
@@ -2560,7 +2601,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         .send(Action::LoadFailed {
                                             tab_index,
                                             url,
-                                            error: e.to_string(),
+                                            error: format!("{e:#}"),
                                             generation,
                                         })
                                         .await;
@@ -2627,7 +2668,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let tx = action_tx.clone();
                                 let base_url = url.clone();
                                 let vh = viewport_height;
-                                let timeout = config.timeout;
+                                let img_options = config.fetch_options();
 
                                 tokio::spawn(async move {
                                     let result = load_image_ascii(
@@ -2635,7 +2676,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         &src,
                                         height_attr,
                                         vh,
-                                        timeout,
+                                        &img_options,
                                     )
                                     .await;
                                     let _ = tx
@@ -2782,5 +2823,57 @@ async fn handle_settings_key(
             }
             _ => {}
         },
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::resolve_image_url;
+
+    #[test]
+    fn image_relative_keeps_default_port() {
+        assert_eq!(
+            resolve_image_url("tmutp://example.tnet/docs/page.tmkup", "pic.png"),
+            "tbip://example.tnet/docs/pic.png"
+        );
+    }
+
+    #[test]
+    fn image_relative_keeps_u_port() {
+        assert_eq!(
+            resolve_image_url("tmutps://example.tnet:u3480/docs/page.tmkup", "pic.png"),
+            "tbips://example.tnet:u3480/docs/pic.png"
+        );
+    }
+
+    #[test]
+    fn image_relative_keeps_direct_port_and_query() {
+        assert_eq!(
+            resolve_image_url("tmutp://example.tnet:9000/a/b.tmkup?x=1", "img.png"),
+            "tbip://example.tnet:9000/a/img.png"
+        );
+    }
+
+    #[test]
+    fn image_absolute_path_keeps_authority() {
+        assert_eq!(
+            resolve_image_url("tmutp://example.tnet/dir/page.tmkup", "/img/logo.png"),
+            "tbip://example.tnet/img/logo.png"
+        );
+    }
+
+    #[test]
+    fn image_absolute_url_untouched() {
+        assert_eq!(
+            resolve_image_url("tmutp://example.tnet/page.tmkup", "tbips://cdn.tnet/x.png"),
+            "tbips://cdn.tnet/x.png"
+        );
+    }
+
+    #[test]
+    fn image_ipv6_host_is_bracketed() {
+        assert_eq!(
+            resolve_image_url("tmutp://[::1]:u9000/x.tmkup", "y.png"),
+            "tbip://[::1]:u9000/y.png"
+        );
     }
 }

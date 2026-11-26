@@ -78,6 +78,9 @@ pub enum LineKind {
 pub struct LineMeta {
     pub kind: LineKind,
     pub links: Vec<Link>,
+    /// Span index ranges for each link inside the rendered line
+    /// (used to highlight the link selected with the arrow keys).
+    pub link_spans: Vec<(usize, usize)>,
 }
 
 impl LineMeta {
@@ -85,6 +88,7 @@ impl LineMeta {
         Self {
             kind: LineKind::Normal,
             links: Vec::new(),
+            link_spans: Vec::new(),
         }
     }
 
@@ -92,6 +96,15 @@ impl LineMeta {
         Self {
             kind: LineKind::Normal,
             links,
+            link_spans: Vec::new(),
+        }
+    }
+
+    pub fn with_links_and_spans(links: Vec<Link>, link_spans: Vec<(usize, usize)>) -> Self {
+        Self {
+            kind: LineKind::Normal,
+            links,
+            link_spans,
         }
     }
 
@@ -99,6 +112,7 @@ impl LineMeta {
         Self {
             kind: LineKind::SpoilerHeader { node_id, expanded },
             links: Vec::new(),
+            link_spans: Vec::new(),
         }
     }
 
@@ -110,6 +124,7 @@ impl LineMeta {
                 kind,
             },
             links: Vec::new(),
+            link_spans: Vec::new(),
         }
     }
 
@@ -120,6 +135,7 @@ impl LineMeta {
                 field_index,
             },
             links: Vec::new(),
+            link_spans: Vec::new(),
         }
     }
 
@@ -131,6 +147,7 @@ impl LineMeta {
                 option_index,
             },
             links: Vec::new(),
+            link_spans: Vec::new(),
         }
     }
 
@@ -141,6 +158,7 @@ impl LineMeta {
                 field_index,
             },
             links: Vec::new(),
+            link_spans: Vec::new(),
         }
     }
 
@@ -151,6 +169,7 @@ impl LineMeta {
                 field_index,
             },
             links: Vec::new(),
+            link_spans: Vec::new(),
         }
     }
 
@@ -162,6 +181,7 @@ impl LineMeta {
                 option_index,
             },
             links: Vec::new(),
+            link_spans: Vec::new(),
         }
     }
 
@@ -169,6 +189,7 @@ impl LineMeta {
         Self {
             kind: LineKind::FormSubmit { form_id },
             links: Vec::new(),
+            link_spans: Vec::new(),
         }
     }
 
@@ -176,6 +197,7 @@ impl LineMeta {
         Self {
             kind: LineKind::FormReset { form_id },
             links: Vec::new(),
+            link_spans: Vec::new(),
         }
     }
 }

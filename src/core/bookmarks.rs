@@ -27,8 +27,7 @@ impl Bookmarks {
     }
 
     pub fn path() -> Option<PathBuf> {
-        let home = std::env::var("HOME").ok()?;
-        Some(PathBuf::from(home).join(".config/tbrowser/bookmarks.toml"))
+        crate::core::settings::Settings::config_dir().map(|dir| dir.join("bookmarks.toml"))
     }
 
     pub fn load() -> Self {

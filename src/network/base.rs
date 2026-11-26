@@ -2,42 +2,43 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use url::Url;
 
-/// Returns the host suitable for `TcpStream::connect`.
-///
-/// `Url::host_str()` keeps the brackets around IPv6 literals, but
-/// `ToSocketAddrs` does not accept them (`[::1]` fails to resolve).
-pub fn connect_host(parsed: &Url) -> String {
-    match parsed.host() {
-        Some(url::Host::Ipv6(ip)) => ip.to_string(),
-        Some(url::Host::Ipv4(ip)) => ip.to_string(),
-        Some(url::Host::Domain(domain)) => domain.to_string(),
-        None => "localhost".to_string(),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    Tcp,
+    Tls,
+    Ssh,
+}
+
+impl Transport {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Transport::Tcp => "TCP",
+            Transport::Tls => "TLS",
+            Transport::Ssh => "SSH",
+        }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtocolVersion {
+    V1,
+    V2,
+}
 
-    #[test]
-    fn connect_host_strips_ipv6_brackets() {
-        let parsed = Url::parse("tbip://[::1]:1234/page").unwrap();
-        assert_eq!(connect_host(&parsed), "::1");
+impl ProtocolVersion {
+    pub fn number(self) -> &'static str {
+        match self {
+            ProtocolVersion::V1 => "1.0",
+            ProtocolVersion::V2 => "2.0",
+        }
     }
+}
 
-    #[test]
-    fn connect_host_keeps_ipv4_and_domain() {
-        assert_eq!(
-            connect_host(&Url::parse("tmutp://192.0.2.1/p").unwrap()),
-            "192.0.2.1"
-        );
-        assert_eq!(
-            connect_host(&Url::parse("tmutp://example.com:1234/p").unwrap()),
-            "example.com"
-        );
-    }
+#[derive(Debug, Clone, Copy)]
+pub enum FrameKind {
+    Protocol,
+    Utnp,
 }
 
 #[derive(Debug, Clone)]
@@ -49,19 +50,36 @@ pub struct Response {
     pub headers: HashMap<String, String>,
     pub body: Vec<u8>,
     pub text: String,
+    pub transport: Transport,
+    pub version: ProtocolVersion,
+    pub content_encoding: Option<String>,
+    pub source_content_length: Option<u64>,
+    pub file_sha256: Option<String>,
 }
 
 impl Response {
     pub fn ok(&self) -> bool {
-        (20..30).contains(&self.status_code)
+        matches!(self.status_code, 20 | 22)
+    }
+
+    #[allow(dead_code)]
+    pub fn moved(&self) -> bool {
+        self.status_code == 21
     }
 }
 
 pub type ProgressCallback = Box<dyn Fn(u64, u64) + Send + Sync>;
 
+#[derive(Debug, Clone)]
 pub struct FetchOptions {
     pub follow_redirects: bool,
     pub max_redirects: u32,
+    pub timeout_secs: u64,
+    pub allow_v1: bool,
+    #[allow(dead_code)]
+    pub allow_unencrypted_tcp: bool,
+    pub try_encryption_against_utnp: bool,
+    pub ssh_key_store: Option<std::path::PathBuf>,
 }
 
 impl Default for FetchOptions {
@@ -69,6 +87,11 @@ impl Default for FetchOptions {
         Self {
             follow_redirects: true,
             max_redirects: 10,
+            timeout_secs: 30,
+            allow_v1: false,
+            allow_unencrypted_tcp: false,
+            try_encryption_against_utnp: false,
+            ssh_key_store: None,
         }
     }
 }
@@ -91,5 +114,6 @@ pub trait PostCompatibleProtocol: TextProtocol {
         url: &str,
         data: &[(&str, &str)],
         progress: Option<&ProgressCallback>,
+        options: &FetchOptions,
     ) -> Result<Response>;
 }
